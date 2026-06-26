@@ -15,8 +15,12 @@ const FALLBACK_CONTRACT_ADDRESS = import.meta.env.VITE_MINT_CONTRACT_ADDRESS || 
 const FALLBACK_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || SEPOLIA_CHAIN_ID);
 
 export const SNAKIOX_ABI = [
-  "function mintWithGameResult(bytes snakeData, uint256 score, uint256 snakeLength, bytes32 sessionHash, bytes signature) payable returns (uint256 tokenId)",
+  "function mintWithGameResult(bytes32 snakeDataHash, uint256 score, uint256 snakeLength, bytes32 sessionHash, bool random, uint256 revealBlock, bytes signature) payable returns (uint256 tokenId)",
+  "function saveReplayOnchain(uint256 tokenId, bytes replay)",
+  "function saveReplayURI(uint256 tokenId, string replayURI)",
+  "function replayData(uint256 tokenId) view returns (bytes)",
   "function mintPrice() view returns (uint256)",
+  "function mintPriceFor(address wallet) view returns (uint256)",
   "function totalMinted() view returns (uint256)",
   "function MAX_SUPPLY() view returns (uint256)",
   "function MAX_MINTS_PER_WALLET() view returns (uint256)",
@@ -29,8 +33,13 @@ export const SNAKIOX_ABI = [
   "function tokenURI(uint256 tokenId) view returns (string)",
   "function svgForToken(uint256 tokenId) view returns (string)",
   "function setMintPrice(uint256 newMintPrice)",
+  "function setMintTierPrices(uint256[] prices)",
   "function setGameSigner(address newGameSigner)",
   "function setDefaultRoyalty(address receiver, uint96 feeNumerator)",
+  "function deleteDefaultRoyalty()",
+  "function setTransferValidator(address newTransferValidator)",
+  "function setAutomaticApprovalOfTransfersFromValidator(bool autoApprove)",
+  "function mintVault(address to, uint256 count) returns (uint256 firstTokenId)",
   "function withdraw(address payable recipient)",
   "function transferOwnership(address newOwner)",
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
@@ -53,14 +62,21 @@ export async function mintCompletedRun(rawPayload) {
   }
 
   const contract = new Contract(payload.contractAddress, SNAKIOX_ABI, signer);
-  const mintPrice = await contract.mintPrice();
+  // Positional pricing: pay what THIS wallet owes for its next mint.
+  const price = await contract.mintPriceFor(signerAddress);
+  // Commit-reveal: wait until the backend-committed block is mined so traits are
+  // fixed and the mint can't revert as "too early".
+  await waitForBlock(provider, Number(payload.revealBlock || 0));
+  // Only the hash of the replay goes on-chain — the blob never touches calldata.
   const tx = await contract.mintWithGameResult(
-    payload.snakeData,
+    payload.snakeDataHash,
     payload.score,
     payload.snakeLength,
     payload.sessionHash,
+    payload.random,
+    payload.revealBlock,
     payload.signature,
-    { value: mintPrice }
+    { value: price }
   );
   const receipt = await tx.wait();
 
@@ -68,6 +84,23 @@ export async function mintCompletedRun(rawPayload) {
     txHash: receipt.hash,
     tokenId: extractTokenId(contract, receipt) || receipt.hash
   };
+}
+
+// Replay-storage choice "on-chain": store the raw replay permanently via the
+// contract (SSTORE2). The owner pays; encodes the same bytes the mint hashed.
+export async function saveReplayOnchainTx(tokenId, finalSnakeCells) {
+  const contract = await getSnakioxContractWrite();
+  const replay = hexlify(toUtf8Bytes(JSON.stringify(finalSnakeCells || [])));
+  const tx = await contract.saveReplayOnchain(tokenId, replay);
+  return tx.wait();
+}
+
+// Replay-storage choice "backend": record an on-chain pointer to the replay
+// served by the Snakiox backend.
+export async function saveReplayUriTx(tokenId, replayURI) {
+  const contract = await getSnakioxContractWrite();
+  const tx = await contract.saveReplayURI(tokenId, replayURI);
+  return tx.wait();
 }
 
 function normalizeMintPayload(payload) {
@@ -83,10 +116,22 @@ function normalizeMintPayload(payload) {
     snakeDataHash: payload.snakeDataHash || keccak256(getBytes(snakeData)),
     score: BigInt(payload.score || 0),
     snakeLength: BigInt(payload.snakeLength || finalSnakeCells.length || 0),
+    random: Boolean(payload.random),
+    revealBlock: BigInt(payload.revealBlock || 0),
     contractAddress: payload.contractAddress || FALLBACK_CONTRACT_ADDRESS,
     chainId: payload.chainId || FALLBACK_CHAIN_ID,
     signature: payload.signature || payload.mintSignature
   };
+}
+
+// Wait until the commit-reveal block has been mined (a few seconds). Polls a
+// handful of times; if it lags, we proceed and the wallet shows the revert.
+async function waitForBlock(provider, target) {
+  if (!target) return;
+  for (let i = 0; i < 40; i++) {
+    if ((await provider.getBlockNumber()) > target) return;
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
 }
 
 export async function getSnakioxContractRead() {
@@ -169,9 +214,49 @@ export async function setContractMintPrice(priceEth) {
   return tx.wait();
 }
 
+// Positional tier pricing used by mintPriceFor: pass ETH amounts per mint slot
+// (e.g. "0.01, 0.02, 0.03" → 1st, 2nd, 3rd mint).
+export async function setContractMintTierPrices(pricesEth) {
+  const contract = await getSnakioxContractWrite();
+  const prices = String(pricesEth)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => parseEther(value));
+  if (!prices.length) throw new Error("Enter at least one tier price (ETH).");
+  const tx = await contract.setMintTierPrices(prices);
+  return tx.wait();
+}
+
 export async function setContractGameSigner(address) {
   const contract = await getSnakioxContractWrite();
   const tx = await contract.setGameSigner(address);
+  return tx.wait();
+}
+
+// Owner-only free batch mint to a wallet (mintVault). Bypasses the per-wallet
+// cap; scores are generated on-chain. Mint in modest batches to stay under gas.
+export async function mintVaultToWallet(to, count) {
+  const contract = await getSnakioxContractWrite();
+  const tx = await contract.mintVault(to, BigInt(count));
+  return tx.wait();
+}
+
+export async function deleteContractDefaultRoyalty() {
+  const contract = await getSnakioxContractWrite();
+  const tx = await contract.deleteDefaultRoyalty();
+  return tx.wait();
+}
+
+export async function setContractTransferValidator(address) {
+  const contract = await getSnakioxContractWrite();
+  const tx = await contract.setTransferValidator(address);
+  return tx.wait();
+}
+
+export async function setContractAutoApproveTransfers(autoApprove) {
+  const contract = await getSnakioxContractWrite();
+  const tx = await contract.setAutomaticApprovalOfTransfersFromValidator(Boolean(autoApprove));
   return tx.wait();
 }
 

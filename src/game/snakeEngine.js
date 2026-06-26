@@ -33,6 +33,18 @@ export function makeCellKey(cell) {
   return `${cell.x}:${cell.y}`;
 }
 
+// Direction the head is facing, derived from the head and the cell behind it.
+// Used to orient the snake's eyes. Falls back when the snake has no neck yet.
+export function headDirection(snake, fallback = "RIGHT") {
+  if (!snake || snake.length < 2) return fallback;
+  const [head, neck] = snake;
+  if (head.x > neck.x) return "RIGHT";
+  if (head.x < neck.x) return "LEFT";
+  if (head.y > neck.y) return "DOWN";
+  if (head.y < neck.y) return "UP";
+  return fallback;
+}
+
 export function makeFood(snake) {
   const occupied = new Set(snake.map(makeCellKey));
   const open = [];

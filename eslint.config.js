@@ -16,6 +16,7 @@ export default [
         document: "readonly",
         fetch: "readonly",
         import: "readonly",
+        setTimeout: "readonly",
         window: "readonly"
       },
       parserOptions: {

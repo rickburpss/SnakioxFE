@@ -153,7 +153,34 @@ button:disabled {
 
 .snake-head {
   background: #071007;
+  position: relative;
+  z-index: 1;
 }
+
+/* Two eyes, drawn in the LCD-green so they read as a face on the dark head. */
+.snake-head::before,
+.snake-head::after {
+  content: "";
+  position: absolute;
+  width: 24%;
+  height: 24%;
+  background: #c9ff7a;
+  border-radius: 50%;
+  box-shadow: 0 0 2px rgba(201, 255, 122, 0.6);
+}
+
+/* Facing RIGHT (default): eyes pushed to the leading edge, stacked vertically. */
+.snake-head::before { top: 20%; right: 16%; }
+.snake-head::after { bottom: 20%; right: 16%; }
+
+.snake-head[data-dir="LEFT"]::before { top: 20%; left: 16%; right: auto; }
+.snake-head[data-dir="LEFT"]::after { bottom: 20%; left: 16%; right: auto; }
+
+.snake-head[data-dir="UP"]::before { top: 16%; left: 20%; right: auto; }
+.snake-head[data-dir="UP"]::after { top: 16%; right: 20%; bottom: auto; }
+
+.snake-head[data-dir="DOWN"]::before { bottom: 16%; left: 20%; top: auto; }
+.snake-head[data-dir="DOWN"]::after { bottom: 16%; right: 20%; top: auto; }
 
 .food-cell {
   background: #d7ff82;
@@ -190,6 +217,19 @@ button:disabled {
   max-height: calc(100vh - 2rem);
   overflow: auto;
   padding: 1rem;
+}
+
+/* Groups the play/random/load buttons so they keep the panel's vertical rhythm
+   whether shown in the control panel (desktop) or run-output panel (mobile). */
+.control-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+/* Responsive visibility (mobile breakpoint = 640px, see media query below). */
+.mobile-only {
+  display: none;
 }
 
 .panel-title,
@@ -488,6 +528,24 @@ a.press-key {
   gap: 2px;
   padding: 0.55rem;
   width: 100%;
+}
+
+.replay-progress {
+  background: rgba(11, 18, 11, 0.55);
+  border: 1px solid rgba(97, 113, 79, 0.6);
+  border-radius: 999px;
+  height: 6px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.replay-progress-fill {
+  background: linear-gradient(90deg, #6f8f4f, #d7ff82);
+  border-radius: 999px;
+  box-shadow: 0 0 8px rgba(215, 255, 130, 0.6);
+  display: block;
+  height: 100%;
+  transition: width 80ms linear;
 }
 
 .minted-token-card {
@@ -791,6 +849,212 @@ a.press-key {
   padding: 0;
 }
 
+/* ---- Admin console (routed: overview / allowlist / invites) ---- */
+.admin-page {
+  background: #142018;
+  color: #d7ff96;
+  font-family: inherit;
+  min-height: 100vh;
+  padding: 1.25rem 1rem 2.5rem;
+}
+
+.admin-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin: 0 auto;
+  max-width: 1120px;
+  padding: 1rem;
+}
+
+.admin-nav {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.admin-tab {
+  align-items: center;
+  background: #1a261a;
+  border: 3px solid #0b120b;
+  box-shadow: inset 0 0 0 2px #34431f;
+  color: #9fc06a;
+  cursor: pointer;
+  display: flex;
+  gap: 0.45rem;
+  justify-content: center;
+  letter-spacing: 0.04em;
+  min-height: 48px;
+  padding: 0.6rem 0.5rem;
+  transition: transform 0.08s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.admin-tab:hover {
+  color: #d7ff96;
+  transform: translateY(-1px);
+}
+
+.admin-tab.active {
+  background: linear-gradient(#d8ffa0, #90aa5e);
+  box-shadow: inset 0 -4px 0 rgba(0, 0, 0, 0.24), 0 4px 0 #0b120b;
+  color: #111d0d;
+}
+
+.admin-authbar {
+  align-items: center;
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.admin-authbar .terminal-input {
+  min-height: 44px;
+}
+
+.admin-badge {
+  background: #0d150e;
+  border: 2px solid #536540;
+  color: #9fc06a;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  padding: 0.55rem 0.7rem;
+  white-space: nowrap;
+}
+
+.admin-badge.online {
+  border-color: #6fe06f;
+  color: #b6ff9a;
+}
+
+.admin-overview {
+  align-items: start;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+}
+
+.admin-status-panel,
+.admin-actions-panel,
+.admin-feature-panel {
+  max-height: none;
+}
+
+.admin-actions-grid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  margin-top: 0.4rem;
+}
+
+.action-card {
+  background: #0d150e;
+  border: 2px solid #536540;
+  color: #cfff8f;
+  display: flex;
+  flex-direction: column;
+  padding: 0.85rem;
+}
+
+.action-hint {
+  color: #8fb061;
+  font-size: 0.66rem;
+  line-height: 1.4;
+  margin: 0.35rem 0 0.55rem;
+}
+
+.press-key.danger,
+.start-button.danger {
+  background: linear-gradient(#ffb27a, #c4502b);
+  color: #1c0d06;
+}
+
+/* CSV upload + stats */
+.csv-tools {
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  margin-top: 0.7rem;
+}
+
+.csv-upload {
+  cursor: pointer;
+}
+
+.csv-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+}
+
+.csv-chip {
+  background: #0d150e;
+  border: 2px solid #536540;
+  color: #cfff8f;
+  font-size: 0.68rem;
+  padding: 0.4rem 0.6rem;
+}
+
+.csv-chip.ok {
+  border-color: #6fe06f;
+  color: #b6ff9a;
+}
+
+.csv-chip.warn {
+  border-color: #f2c26e;
+  color: #ffe1a1;
+}
+
+.list-count {
+  color: #8fb061;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  margin-top: 0.85rem;
+}
+
+.scrolled {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.invite-gate,
+.invite-generate {
+  margin-top: 0.7rem;
+}
+
+.invite-row {
+  align-items: center;
+  background: #9ab461;
+  border: 2px solid #0b120b;
+  color: #111d0d;
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: minmax(0, 1fr) auto 34px;
+  margin-bottom: 0.45rem;
+  padding: 0.45rem;
+}
+
+.invite-state {
+  border: 2px solid #0b120b;
+  font-size: 0.6rem;
+  letter-spacing: 0.05em;
+  padding: 0.18rem 0.4rem;
+}
+
+.invite-state.open {
+  background: #cdeb9b;
+}
+
+.invite-state.used {
+  background: #e8c987;
+}
+
+@media (max-width: 900px) {
+  .admin-overview {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 760px) {
   .invite-console-grid {
     grid-template-columns: 1fr;
@@ -802,6 +1066,22 @@ a.press-key {
 
   .allowlist-tools {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .admin-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-authbar {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-badge {
+    text-align: center;
+  }
+
+  .csv-tools {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -848,6 +1128,31 @@ a.press-key {
 
   .desktop-console {
     display: none !important;
+  }
+
+  /* Item 4/6: swap which action buttons + panels are visible on small screens. */
+  .desktop-only {
+    display: none !important;
+  }
+
+  .mobile-only {
+    display: flex !important;
+    flex-direction: column;
+  }
+
+  .mobile-actions {
+    gap: 0.75rem;
+  }
+
+  .mobile-actions .replay-strip,
+  .mobile-actions .minted-strip {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .mobile-actions .token-list {
+    grid-template-columns: 1fr;
   }
 
   .mobile-game-card {

@@ -2,12 +2,16 @@ const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:3000";
 
 async function request(path, options = {}) {
+  const { idempotencyKey, ...fetchOptions } = options;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
-      ...options.headers
+      // Lets the server dedupe retries/double-submits of the same logical action
+      // instead of returning a 409 Conflict.
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      ...fetchOptions.headers
     },
-    ...options
+    ...fetchOptions
   });
 
   const payload = await response.json().catch(() => ({}));
@@ -37,14 +41,26 @@ export function getGameStatus(wallet) {
 export function startGame(wallet) {
   return request("/game/start", {
     method: "POST",
-    body: JSON.stringify({ wallet })
+    body: JSON.stringify({ wallet }),
+    idempotencyKey: `start:${wallet}`
   });
 }
 
 export function completeGame(result) {
   return request("/game/complete", {
     method: "POST",
-    body: JSON.stringify(result)
+    body: JSON.stringify(result),
+    // One completion per session — retries dedupe to the same locked result.
+    idempotencyKey: `complete:${result.sessionId}`
+  });
+}
+
+// Generates a locked random-score result (no play) ready to mint.
+export function generateRandomMint(wallet) {
+  return request("/game/random", {
+    method: "POST",
+    body: JSON.stringify({ wallet }),
+    idempotencyKey: `random:${wallet}`
   });
 }
 
@@ -63,10 +79,18 @@ export function saveReplay(wallet, sessionId, replayURI) {
   });
 }
 
+// Public URL where the backend serves a locked run's replay. Used as the
+// on-chain replayURI for the "store on the backend" choice.
+export function replayUrl(sessionId) {
+  return `${API_BASE_URL}/replay/${sessionId}`;
+}
+
 export function recordMint(wallet, sessionId, tokenId, txHash) {
   return request("/game/mint-record", {
     method: "POST",
-    body: JSON.stringify({ wallet, sessionId, tokenId, txHash })
+    body: JSON.stringify({ wallet, sessionId, tokenId, txHash }),
+    // One mint record per session — guards against double submits.
+    idempotencyKey: `mint-record:${sessionId}`
   });
 }
 
@@ -77,7 +101,8 @@ export function getInviteRedeemMessage(wallet, code) {
 export function redeemInvite(wallet, code, signature) {
   return request("/invite/redeem", {
     method: "POST",
-    body: JSON.stringify({ wallet, code, signature })
+    body: JSON.stringify({ wallet, code, signature }),
+    idempotencyKey: `redeem:${wallet}:${code}`
   });
 }
 

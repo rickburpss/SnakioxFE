@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ChevronDown,
@@ -10,9 +10,15 @@ import {
   ExternalLink,
   Gamepad2,
   Image,
+  LayoutDashboard,
+  RefreshCw,
   RotateCcw,
   ShieldCheck,
+  Ticket,
+  Trash2,
   Trophy,
+  Upload,
+  Users,
   Wallet
 } from "lucide-react";
 import {
@@ -28,11 +34,13 @@ import {
   getRegistrationMessage,
   listInviteCodes,
   listAllowlist,
+  generateRandomMint,
   recordMint,
   readInviteSettings,
   removeAllowlistWallet,
   redeemInvite,
   registerWallet,
+  replayUrl,
   startGame,
   updateInviteSettings
 } from "./api/snakioxApi";
@@ -42,17 +50,25 @@ import {
   START_SNAKE,
   getLevel,
   getSpeed,
+  headDirection,
   makeCellKey
 } from "./game/snakeEngine";
 import { useGame } from "./state/GameContext";
 import {
+  deleteContractDefaultRoyalty,
   loadContractAdminSnapshot,
   loadMintSupplySnapshot,
   loadMintedToken,
   mintCompletedRun,
+  mintVaultToWallet,
+  saveReplayOnchainTx,
+  saveReplayUriTx,
+  setContractAutoApproveTransfers,
   setContractDefaultRoyalty,
   setContractGameSigner,
   setContractMintPrice,
+  setContractMintTierPrices,
+  setContractTransferValidator,
   transferContractOwnership,
   withdrawContract
 } from "./web3/mintContract";
@@ -77,9 +93,27 @@ const OPENSEA_BASE_URL =
   import.meta.env.VITE_OPENSEA_BASE_URL || "https://testnets.opensea.io/assets/sepolia";
 const SEPOLIA_ETHERSCAN_BASE_URL = "https://sepolia.etherscan.io";
 
+// Games auto-end after 40 minutes; the score at that moment becomes final.
+const MAX_GAME_MS = 40 * 60 * 1000;
+
 function buildOpenSeaAssetUrl(tokenId) {
   if (!CONTRACT_ADDRESS || !tokenId) return "";
   return `${OPENSEA_BASE_URL.replace(/\/$/, "")}/${CONTRACT_ADDRESS}/${tokenId}`;
+}
+
+// Best-available final snake cells for the on-chain replay blob, tolerating a
+// JSON-string field (as stored on a locked session) or a live array.
+function resolveFinalCells(mintPayload, game) {
+  const raw =
+    mintPayload?.finalSnakeCells ?? game?.lockedResult?.finalSnakeCells ?? game?.snake ?? [];
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(raw) ? raw : [];
 }
 
 function buildEtherscanTxUrl(txHash) {
@@ -94,10 +128,14 @@ function App() {
   const [supply, setSupply] = useState(null);
   const [isGameModalOpen, setIsGameModalOpen] = useState(false);
   const dialog = useDialog();
+  // Concurrency control + double-submit protection: a keyed action started while
+  // it (or any other guarded action) is in flight is dropped, and `pending`
+  // drives the disabled state of the buttons so rapid clicks can't re-fire.
+  const { run, busy } = useActionGuard();
   const level = getLevel(game.score);
   const speed = getSpeed(game.score);
   const completedSessionRef = useRef(null);
-  const isAdminPath = window.location.pathname === "/sekioadmini";
+  const isAdminPath = window.location.pathname.startsWith("/sekioadmini");
 
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -137,6 +175,15 @@ function App() {
     return () => window.clearInterval(timer);
   }, [dispatch, game.phase, speed]);
 
+  // Auto-end the run 40 minutes after it started (keeps the whole play→mint
+  // flow well inside the chain's reveal window).
+  useEffect(() => {
+    if (game.phase !== "playing" || !game.startedAt) return undefined;
+    const remaining = MAX_GAME_MS - (Date.now() - game.startedAt);
+    const timer = window.setTimeout(() => dispatch({ type: "TIMEOUT" }), Math.max(remaining, 0));
+    return () => window.clearTimeout(timer);
+  }, [dispatch, game.phase, game.startedAt]);
+
   useEffect(() => {
     if (game.phase !== "dead" || !state.wallet || !game.sessionId) return;
     if (completedSessionRef.current === game.sessionId) return;
@@ -174,46 +221,45 @@ function App() {
     dispatch({ type: "SET_WALLET", wallet: event.target.value.trim() });
   };
 
-  const connectWallet = async () => {
-    if (!window.ethereum) {
-      dispatch({ type: "SET_ERROR", message: "Install a browser wallet to register." });
-      return;
-    }
+  // One button now connects the wallet AND signs in (registers) in a single
+  // flow, so the user never has to click two separate buttons.
+  const connectAndSignIn = () =>
+    run("connect", async () => {
+      if (!window.ethereum) {
+        dispatch({ type: "SET_ERROR", message: "Install a browser wallet to connect." });
+        return;
+      }
 
-    try {
-      dispatch({ type: "SET_LOADING", label: "Connecting" });
-      const [wallet] = await window.ethereum.request({ method: "eth_requestAccounts" });
-      dispatch({ type: "SET_WALLET", wallet });
-      await loadStatus(wallet);
-    } catch (error) {
-      dispatch({ type: "SET_ERROR", message: error.message });
-    }
-  };
+      try {
+        dispatch({ type: "SET_LOADING", label: "Connecting" });
+        const [wallet] = await window.ethereum.request({ method: "eth_requestAccounts" });
+        dispatch({ type: "SET_WALLET", wallet });
 
-  const register = async () => {
-    if (!state.wallet) {
-      dispatch({ type: "SET_ERROR", message: "Connect or enter a wallet first." });
-      return;
-    }
+        dispatch({ type: "SET_LOADING", label: "Signing in" });
+        const { message } = await getRegistrationMessage(wallet);
+        const signature = await window.ethereum.request({
+          method: "personal_sign",
+          params: [message, wallet]
+        });
+        const registered = await registerWallet(wallet, signature);
+        const [status, results] = await Promise.all([
+          getGameStatus(wallet),
+          getLockedResults(wallet).catch(() => ({ sessions: [] }))
+        ]);
+        dispatch({ type: "REGISTERED", user: registered.user, status });
+        dispatch({ type: "RESULTS_LOADED", sessions: results.sessions || [] });
+      } catch (error) {
+        dispatch({ type: "SET_ERROR", message: error.message });
+      }
+    });
 
-    if (!window.ethereum) {
-      dispatch({ type: "SET_ERROR", message: "A browser wallet is required for signing." });
-      return;
-    }
-
-    try {
-      dispatch({ type: "SET_LOADING", label: "Signing" });
-      const { message } = await getRegistrationMessage(state.wallet);
-      const signature = await window.ethereum.request({
-        method: "personal_sign",
-        params: [message, state.wallet]
-      });
-      const registered = await registerWallet(state.wallet, signature);
-      const status = await getGameStatus(state.wallet);
-      dispatch({ type: "REGISTERED", user: registered.user, status });
-    } catch (error) {
-      dispatch({ type: "SET_ERROR", message: error.message });
-    }
+  // Clears the session locally. (Browser wallets stay "connected" at the
+  // extension level; this resets the app so a different wallet can sign in.)
+  const disconnect = () => {
+    dispatch({ type: "DISCONNECT" });
+    setInviteCode("");
+    setSupply(null);
+    completedSessionRef.current = null;
   };
 
   const loadStatus = async (wallet = state.wallet) => {
@@ -231,63 +277,81 @@ function App() {
     }
   };
 
-  const play = async () => {
-    if (!state.wallet) {
-      dispatch({ type: "SET_ERROR", message: "Register a wallet before playing." });
-      return;
-    }
+  const scanStatus = () => run("status", () => loadStatus());
 
-    try {
-      completedSessionRef.current = null;
-      dispatch({ type: "SET_LOADING", label: "Starting" });
-      const session = await startGame(state.wallet);
-      dispatch({ type: "STARTED", sessionId: session.sessionId });
-    } catch (error) {
-      dispatch({ type: "SET_ERROR", message: error.message });
-    }
-  };
+  const play = () =>
+    run("play", async () => {
+      if (!state.wallet) {
+        dispatch({ type: "SET_ERROR", message: "Connect a wallet before playing." });
+        return;
+      }
 
-  const redeemCode = async () => {
-    if (!state.wallet || !inviteCode) {
-      dispatch({ type: "SET_ERROR", message: "Connect wallet and enter invite code first." });
-      return;
-    }
+      try {
+        completedSessionRef.current = null;
+        dispatch({ type: "SET_LOADING", label: "Starting" });
+        const session = await startGame(state.wallet);
+        dispatch({ type: "STARTED", sessionId: session.sessionId });
+      } catch (error) {
+        dispatch({ type: "SET_ERROR", message: error.message });
+      }
+    });
 
-    if (!window.ethereum) {
-      dispatch({ type: "SET_ERROR", message: "A browser wallet is required to redeem code." });
-      return;
-    }
+  const redeemCode = () =>
+    run("redeem", async () => {
+      if (!state.wallet || !inviteCode) {
+        dispatch({ type: "SET_ERROR", message: "Connect wallet and enter invite code first." });
+        return;
+      }
 
-    try {
-      dispatch({ type: "SET_LOADING", label: "Redeeming code" });
-      const { message, code } = await getInviteRedeemMessage(state.wallet, inviteCode);
-      const signature = await window.ethereum.request({
-        method: "personal_sign",
-        params: [message, state.wallet]
-      });
-      await redeemInvite(state.wallet, code, signature);
-      const status = await getGameStatus(state.wallet);
-      dispatch({ type: "STATUS_LOADED", status });
-      dialog.notify("Invite code redeemed. This wallet can now play and mint.");
-    } catch (error) {
-      dispatch({ type: "SET_ERROR", message: error.message });
-    }
-  };
+      if (!window.ethereum) {
+        dispatch({ type: "SET_ERROR", message: "A browser wallet is required to redeem code." });
+        return;
+      }
 
-  const fetchResult = async () => {
-    if (!state.wallet) return;
-    try {
-      dispatch({ type: "SET_LOADING", label: "Loading result" });
-      const result = await getLockedResults(state.wallet);
-      dispatch({ type: "RESULTS_LOADED", sessions: result.sessions || [] });
-    } catch (error) {
-      dispatch({ type: "SET_ERROR", message: error.message });
-    }
-  };
+      try {
+        dispatch({ type: "SET_LOADING", label: "Redeeming code" });
+        const { message, code } = await getInviteRedeemMessage(state.wallet, inviteCode);
+        const signature = await window.ethereum.request({
+          method: "personal_sign",
+          params: [message, state.wallet]
+        });
+        await redeemInvite(state.wallet, code, signature);
+        const status = await getGameStatus(state.wallet);
+        dispatch({ type: "STATUS_LOADED", status });
+        dialog.notify("Invite code redeemed. This wallet can now play and mint.");
+      } catch (error) {
+        dispatch({ type: "SET_ERROR", message: error.message });
+      }
+    });
 
-  const mintRun = async () => {
-    const mintPayload = state.mint || state.game.lockedResult;
+  const fetchResult = () =>
+    run("result", async () => {
+      if (!state.wallet) return;
+      try {
+        dispatch({ type: "SET_LOADING", label: "Loading result" });
+        const result = await getLockedResults(state.wallet);
+        dispatch({ type: "RESULTS_LOADED", sessions: result.sessions || [] });
+      } catch (error) {
+        dispatch({ type: "SET_ERROR", message: error.message });
+      }
+    });
 
+  const mintRun = () => run("mint", () => mintFromPayload(state.mint || state.game.lockedResult));
+
+  // Generate a locked random-score result (no play) and mint it immediately.
+  const generateRandomAndMint = () =>
+    run("mint", async () => {
+      try {
+        dispatch({ type: "SET_LOADING", label: "Generating random score" });
+        const result = await generateRandomMint(state.wallet);
+        dispatch({ type: "LOCKED", session: result.session, mint: result.mint });
+        await mintFromPayload(result.mint);
+      } catch (error) {
+        dispatch({ type: "SET_ERROR", message: error.shortMessage || error.message });
+      }
+    });
+
+  const mintFromPayload = async (mintPayload) => {
     if (!mintPayload) {
       dispatch({ type: "SET_ERROR", message: "Complete or load a locked run before minting." });
       return;
@@ -305,7 +369,41 @@ function App() {
       ]);
       dispatch({ type: "STATUS_LOADED", status });
       setSupply(nextSupply);
-      dialog.notify(`Mint complete. Token #${minted.tokenId} is ready.`);
+
+      // Player chooses where the replay lives: on-chain, backend, or nowhere.
+      // Random-score mints never played, so there is no replay to save.
+      let replayNote = "Replay not saved.";
+      if (mintPayload.random) {
+        dialog.notify(`Token #${minted.tokenId} minted. Random score — no replay to save.`);
+        return;
+      }
+      try {
+        const choice = await dialog.choose(
+          "Where should your game replay live? On-chain is permanent but costs extra gas; Snakiox off-chain storage is free for now.",
+          [
+            { key: "onchain", label: "ON-CHAIN" },
+            { key: "backend", label: "OFF-CHAIN" },
+            { key: "none", label: "DON'T SAVE" }
+          ],
+          "SAVE REPLAY"
+        );
+        if (choice === "onchain") {
+          dispatch({ type: "SET_LOADING", label: "Storing replay on-chain" });
+          await saveReplayOnchainTx(minted.tokenId, resolveFinalCells(mintPayload, state.game));
+          dispatch({ type: "SET_LOADING", label: "" });
+          replayNote = "Replay stored on-chain.";
+        } else if (choice === "backend") {
+          dispatch({ type: "SET_LOADING", label: "Linking backend replay" });
+          await saveReplayUriTx(minted.tokenId, replayUrl(sessionId));
+          dispatch({ type: "SET_LOADING", label: "" });
+          replayNote = "Replay saved off-chain.";
+        }
+      } catch (replayError) {
+        dispatch({ type: "SET_LOADING", label: "" });
+        replayNote = `Replay not saved (${replayError.shortMessage || replayError.message}).`;
+      }
+
+      dialog.notify(`Token #${minted.tokenId} minted. ${replayNote}`);
     } catch (error) {
       dispatch({ type: "SET_ERROR", message: error.shortMessage || error.message });
     }
@@ -326,15 +424,17 @@ function App() {
         <div className="app-layout mx-auto grid h-full max-h-screen w-full max-w-7xl gap-5 px-4 py-4 lg:grid-cols-[330px_minmax(0,1fr)_330px] lg:px-6">
           <ControlPanel
             state={state}
+            busy={busy}
             onWalletInput={handleWalletInput}
-            onConnect={connectWallet}
-            onRegister={register}
+            onConnect={connectAndSignIn}
+            onDisconnect={disconnect}
             inviteCode={inviteCode}
             onInviteCodeChange={setInviteCode}
             onRedeemCode={redeemCode}
-            onStatus={() => loadStatus()}
+            onStatus={scanStatus}
             onStart={play}
             onResult={fetchResult}
+            onGenerateRandom={generateRandomAndMint}
           />
           <MobileGameLauncher
             game={game}
@@ -357,7 +457,16 @@ function App() {
               supply={supply}
             />
           </section>
-          <ResultPanel state={state} level={level} speed={speed} onMint={mintRun} />
+          <ResultPanel
+            state={state}
+            busy={busy}
+            level={level}
+            speed={speed}
+            onMint={mintRun}
+            onGenerateRandom={generateRandomAndMint}
+            onResult={fetchResult}
+          />
+          <MobileActionsPanel sessions={state.lockedResults} />
         </div>
       </main>
       {isGameModalOpen && (
@@ -483,10 +592,48 @@ function MintSupplyTracker({ supply }) {
   );
 }
 
+const ADMIN_ROUTES = {
+  overview: "/sekioadmini",
+  allowlist: "/sekioadmini/allowlist",
+  invites: "/sekioadmini/invites"
+};
+
+// Matches an EVM address anywhere in a string (a CSV cell, a line, etc.).
+const WALLET_RE = /0x[a-fA-F0-9]{40}/g;
+
+// Pulls every wallet address out of free-form text (pasted list OR a CSV with a
+// header row and extra columns) and removes duplicates case-insensitively.
+// Because we match by pattern, header text and non-wallet columns are ignored.
+function extractWallets(text) {
+  const matches = String(text || "").match(WALLET_RE) || [];
+  const seen = new Set();
+  const wallets = [];
+  let duplicates = 0;
+  for (const raw of matches) {
+    const key = raw.toLowerCase();
+    if (seen.has(key)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(key);
+    wallets.push(raw);
+  }
+  return { wallets, duplicates, total: matches.length };
+}
+
+function resolveAdminView() {
+  const path = window.location.pathname.replace(/\/+$/, "");
+  if (path === ADMIN_ROUTES.allowlist) return "allowlist";
+  if (path === ADMIN_ROUTES.invites) return "invites";
+  return "overview";
+}
+
 function AdminPage({ dialog }) {
   const [snapshot, setSnapshot] = useState(null);
   const [loadingLabel, setLoadingLabel] = useState("");
   const [message, setMessage] = useState("");
+  const [view, setView] = useState(resolveAdminView);
+  const [allowlistStats, setAllowlistStats] = useState(null);
   const [form, setForm] = useState({
     adminWallet: "",
     allowlistInput: "",
@@ -497,10 +644,30 @@ function AdminPage({ dialog }) {
     royaltyReceiver: "",
     royaltyBps: "500",
     withdrawRecipient: "",
-    newOwner: ""
+    newOwner: "",
+    vaultRecipient: "",
+    vaultCount: "1",
+    tierPrices: "",
+    transferValidator: "",
+    autoApprove: true
   });
   const [inviteCodes, setInviteCodes] = useState([]);
   const [allowlistEntries, setAllowlistEntries] = useState([]);
+
+  useEffect(() => {
+    const syncView = () => setView(resolveAdminView());
+    window.addEventListener("popstate", syncView);
+    return () => window.removeEventListener("popstate", syncView);
+  }, []);
+
+  const navigate = (nextView) => {
+    const target = ADMIN_ROUTES[nextView] || ADMIN_ROUTES.overview;
+    if (window.location.pathname !== target) {
+      window.history.pushState({}, "", target);
+    }
+    setMessage("");
+    setView(nextView);
+  };
 
   const loadSnapshot = async () => {
     try {
@@ -514,7 +681,8 @@ function AdminPage({ dialog }) {
         gameSigner: nextSnapshot.gameSigner,
         royaltyReceiver: nextSnapshot.owner,
         withdrawRecipient: nextSnapshot.owner,
-        newOwner: nextSnapshot.owner
+        newOwner: nextSnapshot.owner,
+        vaultRecipient: current.vaultRecipient || nextSnapshot.owner
       }));
     } catch (error) {
       setMessage(error.shortMessage || error.message);
@@ -660,14 +828,47 @@ function AdminPage({ dialog }) {
     }
   };
 
+  // Reads an uploaded CSV/TXT, extracts wallet addresses (ignoring header rows
+  // and any other columns) and merges them into the textarea with duplicates
+  // already removed. Never throws on a bad file — it just reports.
+  const handleAllowlistFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // allow re-uploading the same file
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const fromFile = extractWallets(text);
+      if (!fromFile.wallets.length) {
+        setAllowlistStats(null);
+        dialog.notify("No wallet addresses found in that file.");
+        return;
+      }
+
+      const merged = extractWallets(`${form.allowlistInput}\n${fromFile.wallets.join("\n")}`);
+      setForm((current) => ({ ...current, allowlistInput: merged.wallets.join("\n") }));
+      setAllowlistStats({
+        source: file.name,
+        found: fromFile.wallets.length,
+        removed: fromFile.duplicates,
+        ready: merged.wallets.length
+      });
+    } catch (error) {
+      dialog.notify(`Could not read file: ${error.message}`);
+    }
+  };
+
+  const dedupeAllowlistInput = () => {
+    const { wallets, duplicates } = extractWallets(form.allowlistInput);
+    setForm((current) => ({ ...current, allowlistInput: wallets.join("\n") }));
+    setAllowlistStats({ source: "manual", found: wallets.length, removed: duplicates, ready: wallets.length });
+  };
+
   const addAllowlistEntries = async () => {
-    const wallets = form.allowlistInput
-      .split(/[\s,]+/)
-      .map((wallet) => wallet.trim())
-      .filter(Boolean);
+    const { wallets, duplicates } = extractWallets(form.allowlistInput);
 
     if (!wallets.length) {
-      dialog.notify("Enter at least one wallet address.");
+      dialog.notify("Add at least one valid 0x wallet address.");
       return;
     }
 
@@ -679,7 +880,9 @@ function AdminPage({ dialog }) {
       const result = await listAllowlist(form.adminWallet, signature);
       setAllowlistEntries(result.entries || []);
       setForm((current) => ({ ...current, allowlistInput: "" }));
-      setMessage(`Added allowlist wallets. ${wallets.length} submitted.`);
+      setAllowlistStats(null);
+      const dupNote = duplicates ? ` (${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped)` : "";
+      setMessage(`Added ${wallets.length} wallet${wallets.length === 1 ? "" : "s"} to the allowlist${dupNote}.`);
     } catch (error) {
       setMessage(error.shortMessage || error.message);
     } finally {
@@ -745,141 +948,401 @@ function AdminPage({ dialog }) {
     }
   };
 
+  const walletConnected = Boolean(form.adminWallet);
+  const shortWallet = walletConnected
+    ? `${form.adminWallet.slice(0, 6)}…${form.adminWallet.slice(-4)}`
+    : "NOT CONNECTED";
+
   return (
-    <main className="min-h-screen bg-[#142018] px-4 py-5 font-arcade text-[#d7ff96]">
-      <section className="mx-auto max-w-6xl console-shell">
+    <main className="admin-page">
+      <section className="admin-shell console-shell">
         <div className="brand-strip">
           <span>SNAKIOX ADMIN</span>
-          <span>HIDDEN ROUTE /SEKIOADMINI</span>
+          <span>/SEKIOADMINI</span>
         </div>
-        <div className="grid gap-4 p-4 lg:grid-cols-[1fr_1.2fr]">
-          <aside className="panel">
+
+        <nav className="admin-nav" aria-label="Admin sections">
+          <button
+            className={`admin-tab ${view === "overview" ? "active" : ""}`}
+            onClick={() => navigate("overview")}
+            type="button"
+          >
+            <LayoutDashboard size={16} />
+            OVERVIEW
+          </button>
+          <button
+            className={`admin-tab ${view === "allowlist" ? "active" : ""}`}
+            onClick={() => navigate("allowlist")}
+            type="button"
+          >
+            <Users size={16} />
+            ALLOWLIST
+          </button>
+          <button
+            className={`admin-tab ${view === "invites" ? "active" : ""}`}
+            onClick={() => navigate("invites")}
+            type="button"
+          >
+            <Ticket size={16} />
+            INVITE CODES
+          </button>
+        </nav>
+
+        <div className="admin-authbar">
+          <button className="press-key" onClick={connectAdminWallet} type="button">
+            <Wallet size={15} />
+            {walletConnected ? "RECONNECT" : "CONNECT ADMIN WALLET"}
+          </button>
+          <input
+            className="terminal-input"
+            name="adminWallet"
+            onChange={updateForm}
+            placeholder="admin wallet"
+            value={form.adminWallet}
+          />
+          <span className={`admin-badge ${walletConnected ? "online" : ""}`}>{shortWallet}</span>
+        </div>
+
+        {loadingLabel && <div className="pulse-note">{loadingLabel}...</div>}
+        {message && <div className="status-tape">{message}</div>}
+
+        {view === "overview" && (
+          <div className="admin-overview">
+            <aside className="panel admin-status-panel">
+              <div className="panel-title">
+                <ShieldCheck size={18} />
+                CONTRACT STATUS
+              </div>
+              <button className="start-button wide" onClick={loadSnapshot} type="button">
+                <RefreshCw size={16} />
+                LOAD CONTRACT
+              </button>
+              {snapshot ? (
+                <>
+                  <div className="metric-row">
+                    <span>CHAIN</span>
+                    <strong>{snapshot.chainId}</strong>
+                  </div>
+                  <div className="metric-row">
+                    <span>MINTED</span>
+                    <strong>
+                      {snapshot.totalMinted}/{snapshot.maxSupply}
+                    </strong>
+                  </div>
+                  <div className="metric-row">
+                    <span>PRICE</span>
+                    <strong>{snapshot.mintPriceEth} ETH</strong>
+                  </div>
+                  <div className="metric-row">
+                    <span>PER WALLET</span>
+                    <strong>{snapshot.maxMintsPerWallet}</strong>
+                  </div>
+                  <div className="output-window">
+                    <p>Contract</p>
+                    <code>{snapshot.contractAddress}</code>
+                    <p>Owner</p>
+                    <code>{snapshot.owner}</code>
+                    <p>Game signer</p>
+                    <code>{snapshot.gameSigner}</code>
+                  </div>
+                </>
+              ) : (
+                <div className="status-tape">Load the contract to read live on-chain state.</div>
+              )}
+            </aside>
+
+            <section className="panel admin-actions-panel">
+              <div className="panel-title">
+                <Wallet size={18} />
+                OWNER ACTIONS
+              </div>
+              <div className="admin-actions-grid">
+                <AdminAction
+                  buttonLabel="SET MINT PRICE"
+                  hint="Update the public mint price."
+                  inputName="mintPriceEth"
+                  label="Mint price (ETH)"
+                  onChange={updateForm}
+                  onClick={() =>
+                    runAdminAction("Setting price", () => setContractMintPrice(form.mintPriceEth))
+                  }
+                  placeholder="0.01"
+                  value={form.mintPriceEth}
+                />
+                <AdminAction
+                  buttonLabel="SET GAME SIGNER"
+                  hint="Backend wallet that signs mints."
+                  inputName="gameSigner"
+                  label="Game signer"
+                  onChange={updateForm}
+                  onClick={() =>
+                    runAdminAction("Setting signer", () => setContractGameSigner(form.gameSigner))
+                  }
+                  placeholder="0x…"
+                  value={form.gameSigner}
+                />
+                <div className="action-card">
+                  <div className="mini-title">DEFAULT ROYALTY</div>
+                  <p className="action-hint">Receiver + basis points (500 = 5%).</p>
+                  <input
+                    className="terminal-input"
+                    name="royaltyReceiver"
+                    onChange={updateForm}
+                    placeholder="receiver 0x…"
+                    value={form.royaltyReceiver}
+                  />
+                  <input
+                    className="terminal-input mt-2"
+                    name="royaltyBps"
+                    onChange={updateForm}
+                    placeholder="bps e.g. 500"
+                    value={form.royaltyBps}
+                  />
+                  <button
+                    className="press-key wide mt-2"
+                    onClick={() =>
+                      runAdminAction("Setting royalty", () =>
+                        setContractDefaultRoyalty(form.royaltyReceiver, form.royaltyBps)
+                      )
+                    }
+                    type="button"
+                  >
+                    SET ROYALTY
+                  </button>
+                  <button
+                    className="press-key wide danger mt-2"
+                    onClick={() =>
+                      runAdminAction("Deleting royalty", () => deleteContractDefaultRoyalty())
+                    }
+                    type="button"
+                  >
+                    <Trash2 size={15} />
+                    DELETE ROYALTY
+                  </button>
+                </div>
+                <AdminAction
+                  buttonLabel="WITHDRAW"
+                  hint="Send contract balance to a wallet."
+                  inputName="withdrawRecipient"
+                  label="Withdraw recipient"
+                  onChange={updateForm}
+                  onClick={() =>
+                    runAdminAction("Withdrawing", () => withdrawContract(form.withdrawRecipient))
+                  }
+                  placeholder="0x…"
+                  value={form.withdrawRecipient}
+                />
+                <AdminAction
+                  buttonLabel="TRANSFER OWNER"
+                  danger
+                  hint="Hands the contract to a new owner."
+                  inputName="newOwner"
+                  label="New owner"
+                  onChange={updateForm}
+                  onClick={() =>
+                    runAdminAction("Transferring owner", () =>
+                      transferContractOwnership(form.newOwner)
+                    )
+                  }
+                  placeholder="0x…"
+                  value={form.newOwner}
+                />
+                <div className="action-card">
+                  <div className="mini-title">MINT VAULT</div>
+                  <p className="action-hint">
+                    Free owner mint to a wallet. Bypasses the per-wallet cap; mint in small
+                    batches (e.g. 10).
+                  </p>
+                  <input
+                    className="terminal-input"
+                    name="vaultRecipient"
+                    onChange={updateForm}
+                    placeholder="recipient 0x…"
+                    value={form.vaultRecipient}
+                  />
+                  <input
+                    className="terminal-input mt-2"
+                    name="vaultCount"
+                    onChange={updateForm}
+                    placeholder="count e.g. 10"
+                    value={form.vaultCount}
+                  />
+                  <button
+                    className="press-key wide mt-2"
+                    onClick={() =>
+                      runAdminAction("Minting vault", () =>
+                        mintVaultToWallet(form.vaultRecipient, form.vaultCount)
+                      )
+                    }
+                    type="button"
+                  >
+                    MINT TO WALLET
+                  </button>
+                </div>
+                <AdminAction
+                  buttonLabel="SET TIER PRICES"
+                  hint="Per-mint prices in ETH, comma-separated (1st, 2nd, 3rd)."
+                  inputName="tierPrices"
+                  label="Mint tier prices"
+                  onChange={updateForm}
+                  onClick={() =>
+                    runAdminAction("Setting tier prices", () =>
+                      setContractMintTierPrices(form.tierPrices)
+                    )
+                  }
+                  placeholder="0.01, 0.02, 0.03"
+                  value={form.tierPrices}
+                />
+                <div className="action-card">
+                  <div className="mini-title">TRANSFER VALIDATOR</div>
+                  <p className="action-hint">Royalty-enforcement validator + auto-approve.</p>
+                  <input
+                    className="terminal-input"
+                    name="transferValidator"
+                    onChange={updateForm}
+                    placeholder="validator 0x…"
+                    value={form.transferValidator}
+                  />
+                  <button
+                    className="press-key wide mt-2"
+                    onClick={() =>
+                      runAdminAction("Setting validator", () =>
+                        setContractTransferValidator(form.transferValidator)
+                      )
+                    }
+                    type="button"
+                  >
+                    SET VALIDATOR
+                  </button>
+                  <label className="toggle-row mt-2">
+                    <input
+                      checked={form.autoApprove}
+                      name="autoApprove"
+                      onChange={updateForm}
+                      type="checkbox"
+                    />
+                    <span>Auto-approve transfers from validator</span>
+                  </label>
+                  <button
+                    className="press-key wide mt-2"
+                    onClick={() =>
+                      runAdminAction("Updating auto-approve", () =>
+                        setContractAutoApproveTransfers(form.autoApprove)
+                      )
+                    }
+                    type="button"
+                  >
+                    SAVE AUTO-APPROVE
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {view === "allowlist" && (
+          <section className="panel admin-feature-panel">
             <div className="panel-title">
-              <ShieldCheck size={18} />
-              CONTRACT STATUS
+              <Users size={18} />
+              ALLOWLIST ACCESS
             </div>
-            <button className="start-button" onClick={loadSnapshot}>
-              LOAD CONTRACT
-            </button>
-            <button className="press-key wide" onClick={connectAdminWallet}>
-              CONNECT ADMIN WALLET
-            </button>
-            <input
-              className="terminal-input"
-              name="adminWallet"
-              onChange={updateForm}
-              placeholder="admin wallet"
-              value={form.adminWallet}
-            />
-            {snapshot && (
-              <>
-                <div className="metric-row">
-                  <span>CHAIN</span>
-                  <strong>{snapshot.chainId}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>MINTED</span>
-                  <strong>
-                    {snapshot.totalMinted}/{snapshot.maxSupply}
-                  </strong>
-                </div>
-                <div className="metric-row">
-                  <span>PRICE</span>
-                  <strong>{snapshot.mintPriceEth} ETH</strong>
-                </div>
-                <div className="metric-row">
-                  <span>PER WALLET</span>
-                  <strong>{snapshot.maxMintsPerWallet}</strong>
-                </div>
-                <div className="output-window">
-                  <p>Contract</p>
-                  <code>{snapshot.contractAddress}</code>
-                  <p>Owner</p>
-                  <code>{snapshot.owner}</code>
-                  <p>Game signer</p>
-                  <code>{snapshot.gameSigner}</code>
-                </div>
-              </>
-            )}
-            {loadingLabel && <div className="pulse-note">{loadingLabel}...</div>}
-            {message && <div className="status-tape">{message}</div>}
-          </aside>
-          <section className="panel admin-grid">
-            <div className="panel-title">
-              <Wallet size={18} />
-              OWNER ACTIONS
-            </div>
-            <AdminAction
-              buttonLabel="SET MINT PRICE"
-              inputName="mintPriceEth"
-              label="Mint price in ETH"
-              onChange={updateForm}
-              onClick={() =>
-                runAdminAction("Setting price", () => setContractMintPrice(form.mintPriceEth))
-              }
-              value={form.mintPriceEth}
-            />
-            <AdminAction
-              buttonLabel="SET GAME SIGNER"
-              inputName="gameSigner"
-              label="Backend signer address"
-              onChange={updateForm}
-              onClick={() =>
-                runAdminAction("Setting signer", () => setContractGameSigner(form.gameSigner))
-              }
-              value={form.gameSigner}
-            />
-            <div className="output-window">
-              <div className="mini-title">DEFAULT ROYALTY</div>
-              <input
-                className="terminal-input"
-                name="royaltyReceiver"
-                onChange={updateForm}
-                placeholder="receiver"
-                value={form.royaltyReceiver}
-              />
-              <input
-                className="terminal-input mt-2"
-                name="royaltyBps"
-                onChange={updateForm}
-                placeholder="bps e.g. 500"
-                value={form.royaltyBps}
-              />
-              <button
-                className="press-key wide mt-2"
-                onClick={() =>
-                  runAdminAction("Setting royalty", () =>
-                    setContractDefaultRoyalty(form.royaltyReceiver, form.royaltyBps)
-                  )
-                }
-              >
-                SET ROYALTY
+            <p className="action-hint">
+              Upload a CSV (with or without a header) or paste addresses. Wallets are extracted
+              automatically and duplicates are removed before adding.
+            </p>
+
+            <div className="csv-tools">
+              <label className="press-key csv-upload" htmlFor="allowlist-csv">
+                <Upload size={15} />
+                UPLOAD CSV / TXT
+                <input
+                  accept=".csv,.txt,text/csv,text/plain"
+                  hidden
+                  id="allowlist-csv"
+                  onChange={handleAllowlistFile}
+                  type="file"
+                />
+              </label>
+              <button className="press-key" onClick={dedupeAllowlistInput} type="button">
+                <RefreshCw size={15} />
+                DEDUPE
               </button>
             </div>
-            <AdminAction
-              buttonLabel="WITHDRAW"
-              inputName="withdrawRecipient"
-              label="Withdraw recipient"
+
+            {allowlistStats && (
+              <div className="csv-stats">
+                <span className="csv-chip">Source: {allowlistStats.source}</span>
+                <span className="csv-chip">Found: {allowlistStats.found}</span>
+                <span className="csv-chip warn">Duplicates removed: {allowlistStats.removed}</span>
+                <span className="csv-chip ok">Ready: {allowlistStats.ready}</span>
+              </div>
+            )}
+
+            <textarea
+              className="terminal-input allowlist-input"
+              name="allowlistInput"
               onChange={updateForm}
-              onClick={() =>
-                runAdminAction("Withdrawing", () => withdrawContract(form.withdrawRecipient))
-              }
-              value={form.withdrawRecipient}
+              placeholder={"0xWallet1\n0xWallet2\n0xWallet3"}
+              value={form.allowlistInput}
             />
-            <AdminAction
-              buttonLabel="TRANSFER OWNER"
-              inputName="newOwner"
-              label="New owner address"
-              onChange={updateForm}
-              onClick={() =>
-                runAdminAction("Transferring owner", () =>
-                  transferContractOwnership(form.newOwner)
-                )
-              }
-              value={form.newOwner}
-            />
-            <div className="output-window invite-manager">
-              <div className="mini-title">INVITE CODES</div>
+
+            <div className="allowlist-tools">
+              <button className="press-key" onClick={addAllowlistEntries} type="button">
+                ADD TO ALLOWLIST
+              </button>
+              <button className="press-key" onClick={loadAllowlistEntries} type="button">
+                LOAD
+              </button>
+              <button className="press-key" onClick={copyAllowlist} type="button">
+                COPY ALL
+              </button>
+              <button className="press-key danger" onClick={clearAllowlistEntries} type="button">
+                <Trash2 size={15} />
+                CLEAR ALL
+              </button>
+            </div>
+
+            <div className="list-count">
+              {allowlistEntries.length} wallet{allowlistEntries.length === 1 ? "" : "s"} on the allowlist
+            </div>
+            <div className="allowlist-list scrolled">
+              {allowlistEntries.length === 0 && (
+                <div className="status-tape">No allowlisted wallets loaded.</div>
+              )}
+              {allowlistEntries.map((entry) => (
+                <div className="allowlist-row" key={entry.walletAddress}>
+                  <code>{entry.walletAddress}</code>
+                  <button
+                    aria-label={`Copy ${entry.walletAddress}`}
+                    className="icon-copy"
+                    onClick={() => copyCode(entry.walletAddress)}
+                    type="button"
+                  >
+                    <Copy size={15} />
+                  </button>
+                  <button
+                    aria-label={`Remove ${entry.walletAddress}`}
+                    className="icon-remove"
+                    onClick={() => removeAllowlistEntry(entry.walletAddress)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {view === "invites" && (
+          <section className="panel admin-feature-panel">
+            <div className="panel-title">
+              <Ticket size={18} />
+              INVITE CODES
+            </div>
+
+            <div className="output-window invite-gate">
+              <div className="mini-title">ACCESS GATE</div>
               <label className="toggle-row">
                 <input
                   checked={form.inviteRequired}
@@ -887,11 +1350,15 @@ function AdminPage({ dialog }) {
                   onChange={updateForm}
                   type="checkbox"
                 />
-                <span>Require invite code</span>
+                <span>Require an invite code to play &amp; mint</span>
               </label>
-              <button className="press-key wide" onClick={saveInviteRequirement}>
+              <button className="press-key wide" onClick={saveInviteRequirement} type="button">
                 SAVE INVITE MODE
               </button>
+            </div>
+
+            <div className="invite-generate">
+              <div className="mini-title">GENERATE CODES</div>
               <div className="invite-tools">
                 <input
                   className="terminal-input"
@@ -900,112 +1367,90 @@ function AdminPage({ dialog }) {
                   placeholder="1000"
                   value={form.codeCount}
                 />
-                <button className="press-key" onClick={generateCodes}>
+                <button className="press-key" onClick={generateCodes} type="button">
                   GENERATE
                 </button>
-                <button className="press-key" onClick={loadCodes}>
+                <button className="press-key" onClick={loadCodes} type="button">
                   LOAD
                 </button>
-                <button className="press-key" onClick={copyAllCodes}>
+                <button className="press-key" onClick={copyAllCodes} type="button">
                   COPY ALL
                 </button>
-                <button className="press-key" onClick={clearCodes}>
+                <button className="press-key danger" onClick={clearCodes} type="button">
+                  <Trash2 size={15} />
                   CLEAR
                 </button>
-              </div>
-              <div className="invite-list compact">
-                {inviteCodes.length === 0 && <div className="status-tape">No codes loaded.</div>}
-                {inviteCodes.map((invite) => (
-                  <div className="invite-row compact" key={invite.code}>
-                    <code>{invite.code}</code>
-                    <button
-                      aria-label={`Copy ${invite.code}`}
-                      className="icon-copy"
-                      onClick={() => copyCode(invite.code)}
-                      type="button"
-                    >
-                      <Copy size={15} />
-                    </button>
-                  </div>
-                ))}
               </div>
             </div>
-            <div className="output-window allowlist-manager">
-              <div className="mini-title">
-                <ShieldCheck size={16} />
-                ALLOWLIST ACCESS
-              </div>
-              <textarea
-                className="terminal-input allowlist-input"
-                name="allowlistInput"
-                onChange={updateForm}
-                placeholder={"0xWallet1\n0xWallet2\n0xWallet3"}
-                value={form.allowlistInput}
-              />
-              <div className="allowlist-tools">
-                <button className="press-key" onClick={addAllowlistEntries}>
-                  ADD
-                </button>
-                <button className="press-key" onClick={loadAllowlistEntries}>
-                  LOAD
-                </button>
-                <button className="press-key" onClick={copyAllowlist}>
-                  COPY ALL
-                </button>
-                <button className="press-key" onClick={clearAllowlistEntries}>
-                  CLEAR
-                </button>
-              </div>
-              <div className="allowlist-list">
-                {allowlistEntries.length === 0 && (
-                  <div className="status-tape">No allowlisted wallets loaded.</div>
-                )}
-                {allowlistEntries.map((entry) => (
-                  <div className="allowlist-row" key={entry.walletAddress}>
-                    <code>{entry.walletAddress}</code>
-                    <button
-                      aria-label={`Copy ${entry.walletAddress}`}
-                      className="icon-copy"
-                      onClick={() => copyCode(entry.walletAddress)}
-                      type="button"
-                    >
-                      <Copy size={15} />
-                    </button>
-                    <button
-                      aria-label={`Remove ${entry.walletAddress}`}
-                      className="icon-remove"
-                      onClick={() => removeAllowlistEntry(entry.walletAddress)}
-                      type="button"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
+
+            <div className="list-count">{inviteCodes.length} code(s) loaded</div>
+            <div className="invite-list scrolled">
+              {inviteCodes.length === 0 && <div className="status-tape">No codes loaded.</div>}
+              {inviteCodes.map((invite) => (
+                <div className="invite-row" key={invite.code}>
+                  <code>{invite.code}</code>
+                  <span className={`invite-state ${invite.redeemedBy ? "used" : "open"}`}>
+                    {invite.mintedBy ? "MINTED" : invite.redeemedBy ? "REDEEMED" : "OPEN"}
+                  </span>
+                  <button
+                    aria-label={`Copy ${invite.code}`}
+                    className="icon-copy"
+                    onClick={() => copyCode(invite.code)}
+                    type="button"
+                  >
+                    <Copy size={15} />
+                  </button>
+                </div>
+              ))}
             </div>
           </section>
-        </div>
+        )}
       </section>
     </main>
   );
 }
 
-function AdminAction({ buttonLabel, inputName, label, onChange, onClick, value }) {
+function AdminAction({ buttonLabel, danger, hint, inputName, label, onChange, onClick, placeholder, value }) {
   return (
-    <div className="output-window">
+    <div className="action-card">
       <div className="mini-title">{label}</div>
+      {hint && <p className="action-hint">{hint}</p>}
       <input
         className="terminal-input"
         name={inputName}
         onChange={onChange}
-        placeholder={label}
+        placeholder={placeholder || label}
         value={value}
       />
-      <button className="press-key wide mt-2" onClick={onClick}>
+      <button className={`press-key wide mt-2 ${danger ? "danger" : ""}`} onClick={onClick} type="button">
         {buttonLabel}
       </button>
     </div>
   );
+}
+
+// Concurrency control + double-submit protection. `run(key, fn)` refuses to
+// start while any guarded action is already in flight (the synchronous ref check
+// drops rapid double-clicks before React re-renders), and exposes `pending`/
+// `busy` so buttons can disable themselves while a request is running.
+function useActionGuard() {
+  const inFlightRef = useRef(new Set());
+  const [pending, setPending] = useState({});
+
+  const run = useCallback(async (key, fn) => {
+    if (inFlightRef.current.size > 0) return undefined;
+    inFlightRef.current.add(key);
+    setPending((prev) => ({ ...prev, [key]: true }));
+    try {
+      return await fn();
+    } finally {
+      inFlightRef.current.delete(key);
+      setPending((prev) => ({ ...prev, [key]: false }));
+    }
+  }, []);
+
+  const busy = Object.values(pending).some(Boolean);
+  return { run, pending, busy };
 }
 
 function useDialog() {
@@ -1036,31 +1481,54 @@ function useDialog() {
       });
     });
 
-  return { close, confirm, notify, state: dialogState };
+  // Resolves with the chosen option's `key`. options: [{ key, label }]
+  const choose = (message, options, title = "CHOOSE OPTION") =>
+    new Promise((resolve) => {
+      resolverRef.current = resolve;
+      setDialogState({ message, mode: "choose", title, options });
+    });
+
+  return { close, confirm, choose, notify, state: dialogState };
 }
 
 function CustomDialog({ dialog }) {
   if (!dialog.state) return null;
 
   const isConfirm = dialog.state.mode === "confirm";
+  const isChoose = dialog.state.mode === "choose";
 
   return (
     <div className="custom-alert-backdrop" role="presentation">
       <div className="custom-alert" role="dialog">
         <div className="brand-strip">
           <span>{dialog.state.title}</span>
-          <span>{isConfirm ? "INPUT REQUIRED" : "READY"}</span>
+          <span>{isConfirm || isChoose ? "INPUT REQUIRED" : "READY"}</span>
         </div>
         <p>{dialog.state.message}</p>
         <div className="custom-alert-actions">
-          {isConfirm && (
-            <button className="press-key" onClick={() => dialog.close(false)} type="button">
-              CANCEL
-            </button>
+          {isChoose ? (
+            dialog.state.options.map((option) => (
+              <button
+                key={option.key}
+                className="press-key"
+                onClick={() => dialog.close(option.key)}
+                type="button"
+              >
+                {option.label}
+              </button>
+            ))
+          ) : (
+            <>
+              {isConfirm && (
+                <button className="press-key" onClick={() => dialog.close(false)} type="button">
+                  CANCEL
+                </button>
+              )}
+              <button className="start-button" onClick={() => dialog.close(true)} type="button">
+                {isConfirm ? "CONFIRM" : "OK"}
+              </button>
+            </>
           )}
-          <button className="start-button" onClick={() => dialog.close(true)} type="button">
-            {isConfirm ? "CONFIRM" : "OK"}
-          </button>
         </div>
       </div>
     </div>
@@ -1069,17 +1537,23 @@ function CustomDialog({ dialog }) {
 
 function ControlPanel({
   state,
+  busy,
   onWalletInput,
   onConnect,
-  onRegister,
+  onDisconnect,
   inviteCode,
   onInviteCodeChange,
   onRedeemCode,
   onStatus,
   onStart,
-  onResult
+  onResult,
+  onGenerateRandom
 }) {
+  const connected = Boolean(state.wallet);
   const canStart = state.status?.canPlay || state.status?.activeSessionId;
+  // Item 5: once a wallet is allowlisted or already holds an active code, it
+  // can't redeem again — lock the input and the button.
+  const inviteLocked = Boolean(state.status?.isAllowlisted || state.status?.hasInvite);
 
   return (
     <aside className="panel">
@@ -1095,23 +1569,28 @@ function ControlPanel({
         spellCheck="false"
       />
       <div className="grid grid-cols-2 gap-2">
-        <button className="press-key" onClick={onConnect}>
+        <button className="press-key" onClick={onConnect} disabled={busy}>
           CONNECT
         </button>
-        <button className="press-key" onClick={onRegister}>
-          SIGN IN
+        <button className="press-key" onClick={onDisconnect} disabled={!connected}>
+          DISCONNECT
         </button>
       </div>
-      <button className="press-key wide" onClick={onStatus}>
+      <button className="press-key wide" onClick={onStatus} disabled={busy || !connected}>
         SCAN STATUS
       </button>
       <input
         className="terminal-input"
         onChange={(event) => onInviteCodeChange(event.target.value)}
-        placeholder="SNX-INVITE-CODE"
+        placeholder={inviteLocked ? "CODE ALREADY ACTIVE" : "SNX-INVITE-CODE"}
         value={inviteCode}
+        disabled={inviteLocked}
       />
-      <button className="press-key wide" onClick={onRedeemCode}>
+      <button
+        className="press-key wide"
+        onClick={onRedeemCode}
+        disabled={busy || inviteLocked || !connected}
+      >
         REDEEM CODE
       </button>
       <div className="status-tape">
@@ -1125,15 +1604,26 @@ function ControlPanel({
                 ? "OPEN ACCESS"
                 : "CODE REQUIRED"}
         </p>
-        <p>{state.status?.reason || "ONE CODE. ONE NFT."}</p>
+        {state.status?.reason && <p>{state.status.reason}</p>}
       </div>
-      <button className="start-button" onClick={onStart} disabled={!canStart}>
-        <Gamepad2 size={18} />
-        START RUN
-      </button>
-      <button className="press-key wide" onClick={onResult}>
-        LOAD LOCKED RESULT
-      </button>
+      {/* Item 4: on small screens these move into the RUN OUTPUT panel. */}
+      <div className="desktop-only control-actions">
+        <button className="start-button" onClick={onStart} disabled={busy || !canStart}>
+          <Gamepad2 size={18} />
+          START RUN
+        </button>
+        <button
+          className="press-key wide"
+          onClick={onGenerateRandom}
+          disabled={busy || !state.status?.canPlay}
+          title="Skip playing: get a random score and mint it. No replay, and it can't be re-rolled."
+        >
+          GENERATE RANDOM &amp; MINT
+        </button>
+        <button className="press-key wide" onClick={onResult} disabled={busy || !connected}>
+          LOAD LOCKED RESULT
+        </button>
+      </div>
       {state.loadingLabel && <div className="pulse-note">{state.loadingLabel}...</div>}
       {state.error && <div className="error-tape">{state.error}</div>}
     </aside>
@@ -1154,6 +1644,7 @@ function ScoreLine({ score, level, speed, phase }) {
 function SnakeBoard({ game }) {
   const snakeCells = useMemo(() => new Set(game.snake.map(makeCellKey)), [game.snake]);
   const headKey = makeCellKey(game.snake[0]);
+  const faceDir = game.direction || headDirection(game.snake);
 
   return (
     <div className="lcd-wrap">
@@ -1176,6 +1667,7 @@ function SnakeBoard({ game }) {
                 isHead ? "snake-head" : "",
                 isFood ? "food-cell" : ""
               ].join(" ")}
+              data-dir={isHead ? faceDir : undefined}
               key={key}
             />
           );
@@ -1235,7 +1727,7 @@ function MobileDirectionPad({ canStart, dispatch, gamePhase, onStart }) {
   );
 }
 
-function ResultPanel({ state, level, speed, onMint }) {
+function ResultPanel({ state, busy, level, speed, onMint, onGenerateRandom, onResult }) {
   const session = state.game.lockedResult;
   const hasInviteAccess =
     state.status?.isAllowlisted ||
@@ -1265,10 +1757,25 @@ function ResultPanel({ state, level, speed, onMint }) {
         <span>DEATH</span>
         <strong>{state.game.deathReason || session?.deathReason || "none"}</strong>
       </div>
-      <button className="start-button" onClick={onMint} disabled={!canMint}>
+      <button className="start-button" onClick={onMint} disabled={busy || !canMint}>
         <ShieldCheck size={18} />
         MINT NFT
       </button>
+      {/* Item 4: on small screens the control panel hides these, so they live
+          here under MINT NFT instead. */}
+      <div className="mobile-only control-actions">
+        <button
+          className="press-key wide"
+          onClick={onGenerateRandom}
+          disabled={busy || !state.status?.canPlay}
+          title="Skip playing: get a random score and mint it. No replay, and it can't be re-rolled."
+        >
+          GENERATE RANDOM &amp; MINT
+        </button>
+        <button className="press-key wide" onClick={onResult} disabled={busy || !state.wallet}>
+          LOAD LOCKED RESULT
+        </button>
+      </div>
       <div className="output-window">
         <div className="mini-title">
           <Activity size={16} />
@@ -1287,6 +1794,27 @@ function ResultPanel({ state, level, speed, onMint }) {
         CLASSIC MODE
       </div>
     </aside>
+  );
+}
+
+// Item 6: on small screens the middle console (which holds the replay + minted
+// token strips) is hidden, so surface them in their own panel after RUN OUTPUT.
+function MobileActionsPanel({ sessions }) {
+  const hasReplays = sessions.some((session) => session?.moves?.length);
+  const hasMinted = sessions.some((session) => session?.mintedTokenId);
+
+  return (
+    <section className="panel mobile-only mobile-actions">
+      <div className="panel-title">
+        <LayoutDashboard size={18} />
+        ACTIONS
+      </div>
+      <ReplayPanel sessions={sessions} />
+      <MintedTokensPanel sessions={sessions} />
+      {!hasReplays && !hasMinted && (
+        <div className="status-tape">Play and mint a run to unlock replays and tokens here.</div>
+      )}
+    </section>
   );
 }
 
@@ -1397,6 +1925,7 @@ function ReplayModal({ moves, onClose, session }) {
   const frame = frames[frameIndex] || frames[0] || START_SNAKE;
   const cells = new Set(frame.map(makeCellKey));
   const headKey = makeCellKey(frame[0] || START_SNAKE[0]);
+  const faceDir = headDirection(frame);
 
   useEffect(() => {
     if (frames.length <= 1) return undefined;
@@ -1432,10 +1961,17 @@ function ReplayModal({ moves, onClose, session }) {
                   cells.has(key) ? "snake-cell" : "",
                   headKey === key ? "snake-head" : ""
                 ].join(" ")}
+                data-dir={headKey === key ? faceDir : undefined}
                 key={key}
               />
             );
           })}
+        </div>
+        <div className="replay-progress" aria-hidden="true">
+          <span
+            className="replay-progress-fill"
+            style={{ width: `${((frameIndex + 1) / frames.length) * 100}%` }}
+          />
         </div>
         <div className="metric-row">
           <span>FRAME</span>

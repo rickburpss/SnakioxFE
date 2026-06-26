@@ -22,6 +22,11 @@ function gameReducer(state, action) {
       return { ...state, loadingLabel: "", error: action.message };
     case "SET_WALLET":
       return { ...state, wallet: action.wallet, error: "" };
+    case "DISCONNECT":
+      return {
+        ...initialState,
+        game: createInitialGame()
+      };
     case "REGISTERED":
       return { ...state, user: action.user, status: action.status, loadingLabel: "", error: "" };
     case "STATUS_LOADED":
@@ -62,6 +67,11 @@ function gameReducer(state, action) {
         direction: state.game.pendingDirection
       };
       return { ...state, game: stepGame(withDirection) };
+    }
+    case "TIMEOUT": {
+      if (state.game.phase !== "playing") return state;
+      // 40-min cap reached: lock in whatever score the player has now.
+      return { ...state, game: { ...state.game, phase: "dead", deathReason: "timeout" } };
     }
     case "LOCKED":
       return {
