@@ -658,6 +658,93 @@ a.press-key {
   width: 100%;
 }
 
+/* ── Themed EIP-6963 wallet picker ── */
+.wallet-modal {
+  background: linear-gradient(145deg, #33442f, #1d2b20 44%, #0e170f);
+  border: 5px solid #0d150e;
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55), inset 0 0 0 2px #61714f;
+  color: #d7ff96;
+  display: grid;
+  gap: 0.85rem;
+  max-width: min(92vw, 420px);
+  overflow: auto;
+  padding: 0.85rem;
+  width: 100%;
+}
+
+.wallet-modal-lead {
+  color: #cefb8e;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.wallet-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.wallet-option {
+  align-items: center;
+  background: #0d150e;
+  border: 2px solid #536540;
+  color: #e6ffab;
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.7rem 0.8rem;
+  text-align: left;
+  transition: border-color 120ms ease, transform 80ms ease;
+}
+
+.wallet-option:hover:not(:disabled) {
+  border-color: #cfff7e;
+}
+
+.wallet-option:active:not(:disabled) {
+  transform: translateY(2px);
+}
+
+.wallet-mark {
+  align-items: center;
+  background: #9ab461;
+  border: 2px solid #0c130d;
+  color: #101b0c;
+  display: flex;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.wallet-mark img {
+  border-radius: 4px;
+  display: block;
+}
+
+.wallet-name {
+  flex: 1;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallet-tag {
+  background: linear-gradient(#d8ffa0, #90aa5e);
+  border: 2px solid #0b120b;
+  color: #111d0d;
+  font-size: 0.7rem;
+  font-weight: 800;
+  padding: 0.28rem 0.55rem;
+}
+
+.wallet-modal-note {
+  color: rgba(206, 251, 142, 0.7);
+  font-size: 0.72rem;
+  margin: 0;
+  text-align: center;
+}
+
 .nft-modal-art {
   align-items: center;
   aspect-ratio: 1;

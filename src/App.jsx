@@ -73,6 +73,15 @@ import {
   transferContractOwnership,
   withdrawContract
 } from "./web3/mintContract";
+import {
+  clearActiveProvider,
+  connectWallet,
+  getConnectedAccount,
+  hasInjectedWallet,
+  listWallets,
+  signMessage,
+  watchWallet
+} from "./web3/wallet";
 
 const DIRECTION_KEYS = {
   ArrowUp: "UP",
@@ -164,6 +173,7 @@ function App() {
   const [inviteCode, setInviteCode] = useState("");
   const [supply, setSupply] = useState(null);
   const [isGameModalOpen, setIsGameModalOpen] = useState(false);
+  const [isWalletPickerOpen, setIsWalletPickerOpen] = useState(false);
   const dialog = useDialog();
   // Concurrency control + double-submit protection: a keyed action started while
   // it (or any other guarded action) is in flight is dropped, and `pending`
@@ -262,46 +272,83 @@ function App() {
     dispatch({ type: "SET_WALLET", wallet: event.target.value.trim() });
   };
 
-  // One button now connects the wallet AND signs in (registers) in a single
-  // flow, so the user never has to click two separate buttons.
-  const connectAndSignIn = () =>
-    run("connect", async () => {
-      if (!window.ethereum) {
-        dispatch({ type: "SET_ERROR", message: "Install a browser wallet to connect." });
-        return;
-      }
+  // CONNECT opens the wallet picker (EIP-6963: every installed wallet is listed
+  // by name/icon). Picking one connects it AND signs in (registers) in a single
+  // flow, so the user never juggles two buttons or guesses which wallet ran.
+  const openConnect = () => {
+    if (!hasInjectedWallet()) {
+      dispatch({ type: "SET_ERROR", message: "Install a browser wallet (e.g. MetaMask) to connect." });
+      return;
+    }
+    setIsWalletPickerOpen(true);
+  };
 
+  const connectAndSignIn = (wallet) =>
+    run("connect", async () => {
       try {
         dispatch({ type: "SET_LOADING", label: "Connecting" });
-        const [wallet] = await window.ethereum.request({ method: "eth_requestAccounts" });
-        dispatch({ type: "SET_WALLET", wallet });
+        const { address } = await connectWallet(wallet);
+        dispatch({ type: "SET_WALLET", wallet: address });
+        setIsWalletPickerOpen(false);
 
         dispatch({ type: "SET_LOADING", label: "Signing in" });
-        const { message } = await getRegistrationMessage(wallet);
-        const signature = await window.ethereum.request({
-          method: "personal_sign",
-          params: [message, wallet]
-        });
-        const registered = await registerWallet(wallet, signature);
+        const { message } = await getRegistrationMessage(address);
+        const signature = await signMessage(message, address);
+        const registered = await registerWallet(address, signature);
         const [status, results] = await Promise.all([
-          getGameStatus(wallet),
-          getLockedResults(wallet).catch(() => ({ sessions: [] }))
+          getGameStatus(address),
+          getLockedResults(address).catch(() => ({ sessions: [] }))
         ]);
         dispatch({ type: "REGISTERED", user: registered.user, status });
         dispatch({ type: "RESULTS_LOADED", sessions: results.sessions || [] });
       } catch (error) {
-        dispatch({ type: "SET_ERROR", message: error.message });
+        // 4001 = user rejected the request in their wallet.
+        const message =
+          error?.code === 4001 ? "Connection request rejected." : error.message;
+        dispatch({ type: "SET_ERROR", message });
       }
     });
 
   // Clears the session locally. (Browser wallets stay "connected" at the
   // extension level; this resets the app so a different wallet can sign in.)
   const disconnect = () => {
+    clearActiveProvider();
     dispatch({ type: "DISCONNECT" });
     setInviteCode("");
     setSupply(null);
     completedSessionRef.current = null;
   };
+
+  // Silent reconnect on load: if a wallet already authorized this site, restore
+  // the address + status without popping the wallet UI (no auto sign-in prompt).
+  useEffect(() => {
+    let cancelled = false;
+    getConnectedAccount().then((address) => {
+      if (cancelled || !address) return;
+      dispatch({ type: "SET_WALLET", wallet: address });
+      loadStatus(address);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // React to wallet account changes: switch accounts → reload that wallet;
+  // disconnect at the wallet → reset the session.
+  useEffect(() => {
+    return watchWallet({
+      onAccountsChanged: (address) => {
+        if (!address) {
+          disconnect();
+          return;
+        }
+        dispatch({ type: "SET_WALLET", wallet: address });
+        loadStatus(address);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.wallet]);
 
   const loadStatus = async (wallet = state.wallet) => {
     if (!wallet) return;
@@ -344,18 +391,10 @@ function App() {
         return;
       }
 
-      if (!window.ethereum) {
-        dispatch({ type: "SET_ERROR", message: "A browser wallet is required to redeem code." });
-        return;
-      }
-
       try {
         dispatch({ type: "SET_LOADING", label: "Redeeming code" });
         const { message, code } = await getInviteRedeemMessage(state.wallet, inviteCode);
-        const signature = await window.ethereum.request({
-          method: "personal_sign",
-          params: [message, state.wallet]
-        });
+        const signature = await signMessage(message, state.wallet);
         await redeemInvite(state.wallet, code, signature);
         const status = await getGameStatus(state.wallet);
         dispatch({ type: "STATUS_LOADED", status });
@@ -471,7 +510,7 @@ function App() {
             canPlayRound={canPlayRound}
             mintedOut={mintedOut}
             onWalletInput={handleWalletInput}
-            onConnect={connectAndSignIn}
+            onConnect={openConnect}
             onDisconnect={disconnect}
             inviteCode={inviteCode}
             onInviteCodeChange={setInviteCode}
@@ -531,8 +570,83 @@ function App() {
           />
         </MobileGameModal>
       )}
+      {isWalletPickerOpen && (
+        <WalletConnectModal
+          busy={busy}
+          onClose={() => setIsWalletPickerOpen(false)}
+          onPick={connectAndSignIn}
+        />
+      )}
       <CustomDialog dialog={dialog} />
     </>
+  );
+}
+
+// Themed EIP-6963 wallet picker — lists every installed wallet by name/icon and
+// connects + signs in with the chosen one.
+function WalletConnectModal({ busy, onClose, onPick }) {
+  const [wallets, setWallets] = useState(() => listWallets());
+
+  // Wallets can announce a beat after load — re-poll briefly so a freshly
+  // injected wallet appears without a manual refresh.
+  useEffect(() => {
+    const tick = () => setWallets(listWallets());
+    const t1 = window.setTimeout(tick, 250);
+    const t2 = window.setTimeout(tick, 800);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, []);
+
+  return (
+    <div className="nft-modal-backdrop" onClick={onClose} role="presentation">
+      <div
+        className="wallet-modal"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-label="Connect wallet"
+      >
+        <div className="brand-strip">
+          <span>CONNECT WALLET</span>
+          <button className="modal-close" onClick={onClose} type="button">
+            CLOSE
+          </button>
+        </div>
+        <p className="wallet-modal-lead">
+          Pick a wallet to link &amp; sign in.
+        </p>
+        {wallets.length === 0 ? (
+          <div className="status-tape">
+            No browser wallet detected. Install MetaMask (or another EVM wallet), then
+            reload.
+          </div>
+        ) : (
+          <div className="wallet-list">
+            {wallets.map((wallet) => (
+              <button
+                className="wallet-option"
+                disabled={busy}
+                key={wallet.id}
+                onClick={() => onPick(wallet)}
+                type="button"
+              >
+                <span className="wallet-mark" aria-hidden="true">
+                  {wallet.icon ? (
+                    <img alt="" height={24} src={wallet.icon} width={24} />
+                  ) : (
+                    <Wallet size={18} />
+                  )}
+                </span>
+                <span className="wallet-name">{wallet.name}</span>
+                <span className="wallet-tag">{busy ? "…" : "CONNECT"}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <p className="wallet-modal-note">Sepolia testnet · read access + network switch only.</p>
+      </div>
+    </div>
   );
 }
 

@@ -9,6 +9,7 @@ import {
   parseEther,
   toUtf8Bytes
 } from "ethers";
+import { ensureChain, getActiveProvider } from "./wallet";
 
 const SEPOLIA_CHAIN_ID = 11155111;
 const FALLBACK_CONTRACT_ADDRESS = import.meta.env.VITE_MINT_CONTRACT_ADDRESS || "";
@@ -46,12 +47,12 @@ export const SNAKIOX_ABI = [
 ];
 
 export async function mintCompletedRun(rawPayload, onStatus = () => {}) {
-  if (!window.ethereum) {
+  if (!getActiveProvider()) {
     throw new Error("Install or unlock a browser wallet to mint.");
   }
 
   const payload = normalizeMintPayload(rawPayload);
-  const provider = new BrowserProvider(window.ethereum);
+  const provider = new BrowserProvider(getActiveProvider());
   await ensureChain(Number(payload.chainId));
 
   const signer = await provider.getSigner();
@@ -139,7 +140,7 @@ export async function getRevealStatus(revealBlock) {
   if (!target) return { ready: true, blocksRemaining: 0, secondsRemaining: 0 };
   if (!window.ethereum) return { ready: false, blocksRemaining: 1, secondsRemaining: 12 };
 
-  const provider = new BrowserProvider(window.ethereum);
+  const provider = new BrowserProvider(getActiveProvider());
   const current = await provider.getBlockNumber();
   const ready = current > target;
   const blocksRemaining = ready ? 0 : target - current + 1;
@@ -166,22 +167,22 @@ async function waitForBlock(provider, target, onStatus = () => {}) {
 }
 
 export async function getSnakioxContractRead() {
-  if (!window.ethereum) {
+  if (!getActiveProvider()) {
     throw new Error("Install or unlock a browser wallet.");
   }
 
   await ensureChain(FALLBACK_CHAIN_ID);
-  const provider = new BrowserProvider(window.ethereum);
+  const provider = new BrowserProvider(getActiveProvider());
   return new Contract(FALLBACK_CONTRACT_ADDRESS, SNAKIOX_ABI, provider);
 }
 
 export async function getSnakioxContractWrite() {
-  if (!window.ethereum) {
+  if (!getActiveProvider()) {
     throw new Error("Install or unlock a browser wallet.");
   }
 
   await ensureChain(FALLBACK_CHAIN_ID);
-  const provider = new BrowserProvider(window.ethereum);
+  const provider = new BrowserProvider(getActiveProvider());
   const signer = await provider.getSigner();
   return new Contract(FALLBACK_CONTRACT_ADDRESS, SNAKIOX_ABI, signer);
 }
@@ -307,42 +308,6 @@ export async function transferContractOwnership(newOwner) {
   const contract = await getSnakioxContractWrite();
   const tx = await contract.transferOwnership(newOwner);
   return tx.wait();
-}
-
-async function ensureChain(chainId) {
-  const hexChainId = `0x${chainId.toString(16)}`;
-
-  // Skip the round-trip to the wallet when we're already on the right chain —
-  // eth_chainId is cached/instant, wallet_switchEthereumChain is not. This is
-  // called before every read, so the redundant switches added real latency.
-  try {
-    const currentChainId = await window.ethereum.request({ method: "eth_chainId" });
-    if (currentChainId?.toLowerCase() === hexChainId.toLowerCase()) return;
-  } catch {
-    // Fall through to an explicit switch if we can't read the current chain.
-  }
-
-  try {
-    await window.ethereum.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: hexChainId }]
-    });
-  } catch (error) {
-    if (error.code !== 4902 || chainId !== SEPOLIA_CHAIN_ID) throw error;
-
-    await window.ethereum.request({
-      method: "wallet_addEthereumChain",
-      params: [
-        {
-          chainId: hexChainId,
-          chainName: "Sepolia",
-          nativeCurrency: { name: "Sepolia Ether", symbol: "ETH", decimals: 18 },
-          rpcUrls: ["https://rpc.sepolia.org"],
-          blockExplorerUrls: ["https://sepolia.etherscan.io"]
-        }
-      ]
-    });
-  }
 }
 
 function extractTokenId(contract, receipt) {

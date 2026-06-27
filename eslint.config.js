@@ -14,6 +14,7 @@ export default [
       sourceType: "module",
       globals: {
         document: "readonly",
+        Event: "readonly",
         fetch: "readonly",
         import: "readonly",
         setTimeout: "readonly",
