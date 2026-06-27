@@ -58,6 +58,9 @@ export async function mintCompletedRun(rawPayload, onStatus = () => {}) {
   const signer = await provider.getSigner();
   const signerAddress = await signer.getAddress();
 
+  if (!payload.wallet) {
+    throw new Error("This run has no wallet attached — reload the locked result and try again.");
+  }
   if (signerAddress.toLowerCase() !== payload.wallet.toLowerCase()) {
     throw new Error("Connected wallet does not match the completed run wallet.");
   }

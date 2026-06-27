@@ -453,9 +453,22 @@ function App() {
       }
     });
 
-  const mintFromPayload = async (mintPayload) => {
-    if (!mintPayload) {
+  const mintFromPayload = async (rawPayload) => {
+    if (!rawPayload) {
       dispatch({ type: "SET_ERROR", message: "Complete or load a locked run before minting." });
+      return;
+    }
+
+    // The locked-run/mint object may omit `wallet` — fall back to the connected
+    // wallet, which is the one that must sign the mint (and the one the backend
+    // signed the payload for). Without this the mint crashes on a missing wallet.
+    const mintPayload = {
+      ...rawPayload,
+      wallet: rawPayload.wallet || rawPayload.walletAddress || state.wallet
+    };
+
+    if (!mintPayload.wallet) {
+      dispatch({ type: "SET_ERROR", message: "Connect your wallet before minting." });
       return;
     }
 
