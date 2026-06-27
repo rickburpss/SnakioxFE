@@ -22,6 +22,7 @@ import {
   Wallet
 } from "lucide-react";
 import {
+  abandonPendingSession,
   addAllowlistWallets,
   clearAllowlist,
   clearInviteCodes,
@@ -865,7 +866,8 @@ function AdminPage({ dialog }) {
     vaultCount: "1",
     tierPrices: "",
     transferValidator: "",
-    autoApprove: true
+    autoApprove: true,
+    abandonWallet: ""
   });
   const [inviteCodes, setInviteCodes] = useState([]);
   const [allowlistEntries, setAllowlistEntries] = useState([]);
@@ -1148,6 +1150,30 @@ function AdminPage({ dialog }) {
       await clearAllowlist(form.adminWallet, signature);
       setAllowlistEntries([]);
       setMessage("Allowlist cleared");
+    } catch (error) {
+      setMessage(error.shortMessage || error.message);
+    } finally {
+      setLoadingLabel("");
+    }
+  };
+
+  const abandonRun = async () => {
+    if (!form.abandonWallet) {
+      dialog.notify("Enter a wallet whose stuck run you want to abandon.");
+      return;
+    }
+
+    try {
+      setLoadingLabel("Abandoning pending run");
+      setMessage("");
+      const signature = await signAdminMessage();
+      const result = await abandonPendingSession(form.adminWallet, signature, form.abandonWallet);
+      setForm((current) => ({ ...current, abandonWallet: "" }));
+      setMessage(
+        result.expired
+          ? `Expired ${result.expired} pending run(s) for ${result.wallet}. That wallet can play again.`
+          : `No pending run found for ${result.wallet}.`
+      );
     } catch (error) {
       setMessage(error.shortMessage || error.message);
     } finally {
@@ -1637,6 +1663,26 @@ function AdminPage({ dialog }) {
                   </button>
                 </div>
               ))}
+            </div>
+
+            <div className="invite-generate">
+              <div className="mini-title">ABANDON STUCK RUN</div>
+              <p className="action-hint">
+                Expire a wallet&apos;s locked-but-unminted run so it can play again — e.g.
+                after a game-signer change or an expired reveal block left it unmintable.
+              </p>
+              <div className="invite-tools">
+                <input
+                  className="terminal-input"
+                  name="abandonWallet"
+                  onChange={updateForm}
+                  placeholder="wallet 0x…"
+                  value={form.abandonWallet}
+                />
+                <button className="press-key danger" onClick={abandonRun} type="button">
+                  ABANDON RUN
+                </button>
+              </div>
             </div>
           </section>
         )}

@@ -221,4 +221,12 @@ export function clearAllowlist(wallet, signature) {
   });
 }
 
+// Admin: expire a wallet's locked-but-unminted run so it can play again.
+export function abandonPendingSession(wallet, signature, targetWallet) {
+  return request("/invite/admin/session/abandon", {
+    method: "POST",
+    body: JSON.stringify({ wallet, signature, targetWallet })
+  });
+}
+
 export { API_BASE_URL };
