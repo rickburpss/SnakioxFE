@@ -1172,7 +1172,7 @@ function AdminPage({ dialog }) {
       setMessage(
         result.expired
           ? `Expired ${result.expired} pending run(s) for ${result.wallet}. That wallet can play again.`
-          : `No pending run found for ${result.wallet}.`
+          : `No stuck run for ${result.wallet} (a still-mintable run can't be abandoned).`
       );
     } catch (error) {
       setMessage(error.shortMessage || error.message);
