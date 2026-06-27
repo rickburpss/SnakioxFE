@@ -43,3 +43,48 @@
 - Optional: a distinct "Random" result card (the random result's board preview is empty since nothing was played).
 
 ---
+
+## [2026-06-27] — UX pass, round/mint-spot gating, idempotency + Redis, "off-chain" + snake eyes
+
+### Project Status & Decisions
+- Work spanned 3 repos: FE (`SnakioxFE`), backend (`../SnakioxBE`), contract (`../SnakioxDOTSOL`, read-only this session — `mintVault` already existed, no contract change). Storage driver supports json|postgres; **Redis** is now optional shared state.
+- Player-facing wording: "backend" → "off-chain" (general UI only; admin UI keeps "backend"/"Backend wallet").
+- Invite rule changed to **one code, three chances**: a redeemed code stays valid across all 3 of the wallet's mints (the per-wallet cap of 3 is the real limiter).
+
+### What was added/changed (by file)
+- **`src/App.jsx`**
+  - **Connect + Sign In merged** into one `CONNECT` (connect → register → load status/results); added `DISCONNECT`. New `DISCONNECT` reducer case in `GameContext.jsx` resets to `initialState`.
+  - **`useActionGuard`**: concurrency control + double-submit protection. `run(key, fn)` drops a call while any guarded action is in flight (sync ref check) and exposes `busy` to disable buttons.
+  - **Round gating** `isRoundPending(state)`: true from start (playing/dead/locked) until minted (lockedResult has txHash). Locks START + GENERATE so you can't restart or re-generate mid-round.
+  - **Mint-spot gating** `mintSpotsLeft(status, supply)` + `canStartRound(state, supply)`: START/GENERATE enabled only while wallet has a spot (not 3/3) AND not mid-round; `mintedOut` shows "All 3 mint spots used." Prefers on-chain `supply.mintedByWallet`, falls back to backend `remainingMints`.
+  - Removed hardcoded "ONE CODE. ONE NFT." status line (now only shows backend `reason` when present).
+  - **Redeem locked** (input + button disabled) when `isAllowlisted || hasInvite || inviteRequired === false` (OPEN ACCESS counts).
+  - **Responsive (640px)**: START/RANDOM/LOAD hidden on small screens via `.desktop-only`; RANDOM+LOAD moved under MINT NFT in RUN OUTPUT via `.mobile-only`. New `MobileActionsPanel` (ACTIONS) renders Replay + Minted strips after RUN OUTPUT since the desktop console is hidden on mobile.
+  - **Admin owner actions** added: `mintVault` (owner mint to wallet), `setMintTierPrices`, transfer-validator + auto-approve, delete default royalty.
+  - **Snake eyes**: head cell gets `data-dir` (from `game.direction` live, `headDirection(frame)` in replay); CSS draws directional eyes. Replay modal got a playback progress bar.
+- **`src/game/snakeEngine.js`**: new `headDirection(snake, fallback)`.
+- **`src/api/snakioxApi.js`**: `request()` supports `idempotencyKey` → `Idempotency-Key` header; keys added to start/complete/random/mint-record/redeem.
+- **`src/web3/mintContract.js`**: ABI + helpers for `mintVault`, `setMintTierPrices`, `setTransferValidator`, `setAutomaticApprovalOfTransfersFromValidator`, `deleteDefaultRoyalty`. (Also has live-edited `getRevealStatus` + `onStatus` countdown in `mintCompletedRun` — user's change, kept.)
+- **`eslint.config.js`**: added `setTimeout` to globals (pre-existing `waitForBlock` use).
+- **Backend (`../SnakioxBE`)**
+  - `findInviteByWallet` (jsonStore + postgresStore) no longer filters out minted invites → three chances.
+  - **Idempotency middleware** `src/middleware/idempotency.js`: dedupes mutating POSTs (replays first response instead of 409). Redis-backed when configured (`SET NX PX` lock at `idemp:lock:<key>`, cached response at `idemp:done:<key>`, concurrent dupes poll then replay), in-memory fallback otherwise. Mounted on `/game` and `/invite`.
+  - **Redis** `src/config/redis.js`: lazy shared `rediss://`-capable client, returns null (graceful fallback) if `REDIS_URL` unset or connect fails. `REDIS_URL` added to `env.js`/`.env`/`.env.example`.
+  - **Rate limiting** now uses a shared `RedisStore` (pinned `rate-limit-redis@^4`; v5 needs express-rate-limit v8, project is on v7) wrapped in a **fail-open** store (Redis outage → allow request, not 500). Rate limits 300 global / 120 game / 60 admin per IP per 60s — fine (per-IP; doesn't throttle distinct users).
+
+### Problems Solved / Lessons Learned
+- START/GENERATE were sticking disabled because they hung off backend `canPlay` (only refreshes on status fetch); fixed by driving them off local round state + on-chain mint count.
+- `rate-limit-redis@5` peer-conflicts with express-rate-limit v7 → use v4.
+- express-rate-limit v7 has no built-in fail-open → wrap the store and catch in `increment`.
+
+### Verified
+- FE `npm run lint` + `npm run build` pass (bundle ~474 kB / ~161 kB gzip).
+- BE `npm run lint` (node --check) passes.
+- **Redis live-tested against Upstash**: PING→PONG, SET/GET with NX+PX + TTL ok; and idempotency end-to-end — 2nd request with same `Idempotency-Key` replayed the cached body (`Idempotent-Replay: true`) and the handler did NOT run.
+
+### Goals & Next Steps
+- Ensure `.env` (now holds a real Upstash `REDIS_URL` with password) is gitignored.
+- Multi-instance is now safe (shared idempotency + rate limits) once `REDIS_URL` is set; use Postgres (not json store) in prod.
+- Optional: surface the Snakiox Arcade games dApp (`../snakio-games`, "Snakiox Arcade") — wallet-gated, uses the NFT skin to play/earn.
+
+---
