@@ -19,10 +19,12 @@ import {
   Trophy,
   Upload,
   Users,
-  Wallet
+  Wallet,
 } from "lucide-react";
 import {
   abandonPendingSession,
+  listBotFlags,
+  removeBotFlag,
   addAllowlistWallets,
   clearAllowlist,
   clearInviteCodes,
@@ -30,7 +32,6 @@ import {
   generateInviteCodes,
   getGameStatus,
   getInviteAdminMessage,
-  getInviteRedeemMessage,
   getLockedResults,
   getRegistrationMessage,
   listInviteCodes,
@@ -39,11 +40,10 @@ import {
   recordMint,
   readInviteSettings,
   removeAllowlistWallet,
-  redeemInvite,
   registerWallet,
   replayUrl,
   startGame,
-  updateInviteSettings
+  updateInviteSettings,
 } from "./api/snakioxApi";
 import {
   BOARD_SIZE,
@@ -52,7 +52,7 @@ import {
   getLevel,
   getSpeed,
   headDirection,
-  makeCellKey
+  makeCellKey,
 } from "./game/snakeEngine";
 import { useGame } from "./state/GameContext";
 import {
@@ -72,7 +72,7 @@ import {
   setContractMintTierPrices,
   setContractTransferValidator,
   transferContractOwnership,
-  withdrawContract
+  withdrawContract,
 } from "./web3/mintContract";
 import {
   clearActiveProvider,
@@ -81,7 +81,7 @@ import {
   hasInjectedWallet,
   listWallets,
   signMessage,
-  watchWallet
+  watchWallet,
 } from "./web3/wallet";
 
 const DIRECTION_KEYS = {
@@ -96,7 +96,7 @@ const DIRECTION_KEYS = {
   A: "LEFT",
   ArrowRight: "RIGHT",
   d: "RIGHT",
-  D: "RIGHT"
+  D: "RIGHT",
 };
 
 const CONTRACT_ADDRESS = import.meta.env.VITE_MINT_CONTRACT_ADDRESS || "";
@@ -119,7 +119,10 @@ function buildOpenSeaAssetUrl(tokenId) {
 // JSON-string field (as stored on a locked session) or a live array.
 function resolveFinalCells(mintPayload, game) {
   const raw =
-    mintPayload?.finalSnakeCells ?? game?.lockedResult?.finalSnakeCells ?? game?.snake ?? [];
+    mintPayload?.finalSnakeCells ??
+    game?.lockedResult?.finalSnakeCells ??
+    game?.snake ??
+    [];
   if (typeof raw === "string") {
     try {
       return JSON.parse(raw);
@@ -152,7 +155,8 @@ function isRoundPending(state) {
 // has minted all its spots — START / GENERATE should be off for it.
 function mintSpotsLeft(status, supply) {
   const max = supply?.maxMintsPerWallet ?? status?.maxMintsPerWallet ?? 3;
-  if (supply?.mintedByWallet != null) return Math.max(max - supply.mintedByWallet, 0);
+  if (supply?.mintedByWallet != null)
+    return Math.max(max - supply.mintedByWallet, 0);
   if (status?.remainingMints != null) return status.remainingMints;
   return max;
 }
@@ -165,13 +169,16 @@ function canStartRound(state, supply) {
   if (!status?.registered) return false;
   const hasAccess =
     status.isAllowlisted || status.inviteRequired === false || status.hasInvite;
-  return Boolean(hasAccess) && mintSpotsLeft(status, supply) > 0 && !isRoundPending(state);
+  return (
+    Boolean(hasAccess) &&
+    mintSpotsLeft(status, supply) > 0 &&
+    !isRoundPending(state)
+  );
 }
 
 function App() {
   const { state, dispatch } = useGame();
   const { game } = state;
-  const [inviteCode, setInviteCode] = useState("");
   const [supply, setSupply] = useState(null);
   const [isGameModalOpen, setIsGameModalOpen] = useState(false);
   const [isWalletPickerOpen, setIsWalletPickerOpen] = useState(false);
@@ -189,7 +196,7 @@ function App() {
     (key) =>
       ({ attempt }) =>
         setRetryInfo({ key, attempt }),
-    []
+    [],
   );
 
   // Clear the retry banner once every guarded action has settled.
@@ -201,7 +208,9 @@ function App() {
   // START / GENERATE are enabled while the wallet still has a mint spot (not 3/3)
   // and isn't mid-round; `mintedOut` flags a wallet that has used all 3 spots.
   const canPlayRound = canStartRound(state, supply);
-  const mintedOut = Boolean(state.status?.registered) && mintSpotsLeft(state.status, supply) <= 0;
+  const mintedOut =
+    Boolean(state.status?.registered) &&
+    mintSpotsLeft(state.status, supply) <= 0;
   const completedSessionRef = useRef(null);
   const isAdminPath = window.location.pathname.startsWith("/sekioadmini");
 
@@ -248,7 +257,10 @@ function App() {
   useEffect(() => {
     if (game.phase !== "playing" || !game.startedAt) return undefined;
     const remaining = MAX_GAME_MS - (Date.now() - game.startedAt);
-    const timer = window.setTimeout(() => dispatch({ type: "TIMEOUT" }), Math.max(remaining, 0));
+    const timer = window.setTimeout(
+      () => dispatch({ type: "TIMEOUT" }),
+      Math.max(remaining, 0),
+    );
     return () => window.clearTimeout(timer);
   }, [dispatch, game.phase, game.startedAt]);
 
@@ -267,15 +279,22 @@ function App() {
         snakeLength: game.snake.length,
         finalSnakeCells: game.snake,
         moves: game.moves,
-        deathReason: game.deathReason
+        deathReason: game.deathReason,
       },
       {
         onRetry: ({ attempt }) =>
-          dispatch({ type: "SET_LOADING", label: `Server busy — locking run, retrying (${attempt})` })
-      }
+          dispatch({
+            type: "SET_LOADING",
+            label: `Server busy — locking run, retrying (${attempt})`,
+          }),
+      },
     )
       .then((result) => {
-        dispatch({ type: "LOCKED", session: result.session, mint: result.mint });
+        dispatch({
+          type: "LOCKED",
+          session: result.session,
+          mint: result.mint,
+        });
       })
       .catch((error) => {
         dispatch({ type: "SET_ERROR", message: error.message });
@@ -288,7 +307,7 @@ function App() {
     game.score,
     game.sessionId,
     game.snake,
-    state.wallet
+    state.wallet,
   ]);
 
   const handleWalletInput = (event) => {
@@ -300,7 +319,10 @@ function App() {
   // flow, so the user never juggles two buttons or guesses which wallet ran.
   const openConnect = () => {
     if (!hasInjectedWallet()) {
-      dispatch({ type: "SET_ERROR", message: "Install a browser wallet (e.g. MetaMask) to connect." });
+      dispatch({
+        type: "SET_ERROR",
+        message: "Install a browser wallet (e.g. MetaMask) to connect.",
+      });
       return;
     }
     setIsWalletPickerOpen(true);
@@ -320,7 +342,7 @@ function App() {
         const registered = await registerWallet(address, signature);
         const [status, results] = await Promise.all([
           getGameStatus(address),
-          getLockedResults(address).catch(() => ({ sessions: [] }))
+          getLockedResults(address).catch(() => ({ sessions: [] })),
         ]);
         dispatch({ type: "REGISTERED", user: registered.user, status });
         dispatch({ type: "RESULTS_LOADED", sessions: results.sessions || [] });
@@ -337,7 +359,6 @@ function App() {
   const disconnect = () => {
     clearActiveProvider();
     dispatch({ type: "DISCONNECT" });
-    setInviteCode("");
     setSupply(null);
     completedSessionRef.current = null;
   };
@@ -368,7 +389,7 @@ function App() {
         }
         dispatch({ type: "SET_WALLET", wallet: address });
         loadStatus(address);
-      }
+      },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.wallet]);
@@ -379,7 +400,7 @@ function App() {
       dispatch({ type: "SET_LOADING", label: "Checking" });
       const [status, results] = await Promise.all([
         getGameStatus(wallet),
-        getLockedResults(wallet).catch(() => ({ sessions: [] }))
+        getLockedResults(wallet).catch(() => ({ sessions: [] })),
       ]);
       dispatch({ type: "STATUS_LOADED", status });
       dispatch({ type: "RESULTS_LOADED", sessions: results.sessions || [] });
@@ -393,35 +414,20 @@ function App() {
   const play = () =>
     run("play", async () => {
       if (!state.wallet) {
-        dispatch({ type: "SET_ERROR", message: "Connect a wallet before playing." });
+        dispatch({
+          type: "SET_ERROR",
+          message: "Connect a wallet before playing.",
+        });
         return;
       }
 
       try {
         completedSessionRef.current = null;
         dispatch({ type: "SET_LOADING", label: "Starting" });
-        const session = await startGame(state.wallet, { onRetry: onRetry("play") });
+        const session = await startGame(state.wallet, {
+          onRetry: onRetry("play"),
+        });
         dispatch({ type: "STARTED", sessionId: session.sessionId });
-      } catch (error) {
-        dispatch({ type: "SET_ERROR", message: error.message });
-      }
-    });
-
-  const redeemCode = () =>
-    run("redeem", async () => {
-      if (!state.wallet || !inviteCode) {
-        dispatch({ type: "SET_ERROR", message: "Connect wallet and enter invite code first." });
-        return;
-      }
-
-      try {
-        dispatch({ type: "SET_LOADING", label: "Redeeming code" });
-        const { message, code } = await getInviteRedeemMessage(state.wallet, inviteCode);
-        const signature = await signMessage(message, state.wallet);
-        await redeemInvite(state.wallet, code, signature);
-        const status = await getGameStatus(state.wallet);
-        dispatch({ type: "STATUS_LOADED", status });
-        dialog.notify("Invite code redeemed. This wallet can now play and mint.");
       } catch (error) {
         dispatch({ type: "SET_ERROR", message: error.message });
       }
@@ -439,24 +445,37 @@ function App() {
       }
     });
 
-  const mintRun = () => run("mint", () => mintFromPayload(state.mint || state.game.lockedResult));
+  const mintRun = () =>
+    run("mint", () => mintFromPayload(state.mint || state.game.lockedResult));
 
   // Generate a locked random-score result (no play) and mint it immediately.
   const generateRandomAndMint = () =>
     run("mint", async () => {
       try {
         dispatch({ type: "SET_LOADING", label: "Generating random score" });
-        const result = await generateRandomMint(state.wallet, { onRetry: onRetry("mint") });
-        dispatch({ type: "LOCKED", session: result.session, mint: result.mint });
+        const result = await generateRandomMint(state.wallet, {
+          onRetry: onRetry("mint"),
+        });
+        dispatch({
+          type: "LOCKED",
+          session: result.session,
+          mint: result.mint,
+        });
         await mintFromPayload(result.mint);
       } catch (error) {
-        dispatch({ type: "SET_ERROR", message: error.shortMessage || error.message });
+        dispatch({
+          type: "SET_ERROR",
+          message: error.shortMessage || error.message,
+        });
       }
     });
 
   const mintFromPayload = async (rawPayload) => {
     if (!rawPayload) {
-      dispatch({ type: "SET_ERROR", message: "Complete or load a locked run before minting." });
+      dispatch({
+        type: "SET_ERROR",
+        message: "Complete or load a locked run before minting.",
+      });
       return;
     }
 
@@ -465,27 +484,40 @@ function App() {
     // signed the payload for). Without this the mint crashes on a missing wallet.
     const mintPayload = {
       ...rawPayload,
-      wallet: rawPayload.wallet || rawPayload.walletAddress || state.wallet
+      wallet: rawPayload.wallet || rawPayload.walletAddress || state.wallet,
     };
 
     if (!mintPayload.wallet) {
-      dispatch({ type: "SET_ERROR", message: "Connect your wallet before minting." });
+      dispatch({
+        type: "SET_ERROR",
+        message: "Connect your wallet before minting.",
+      });
       return;
     }
 
     try {
       dispatch({ type: "SET_LOADING", label: "Preparing mint" });
       const minted = await mintCompletedRun(mintPayload, (label) =>
-        dispatch({ type: "SET_LOADING", label })
+        dispatch({ type: "SET_LOADING", label }),
       );
       const sessionId = mintPayload.sessionId || mintPayload.id;
-      await recordMint(state.wallet || mintPayload.wallet, sessionId, minted.tokenId, minted.txHash, {
-        onRetry: onRetry("mint")
+      await recordMint(
+        state.wallet || mintPayload.wallet,
+        sessionId,
+        minted.tokenId,
+        minted.txHash,
+        {
+          onRetry: onRetry("mint"),
+        },
+      );
+      dispatch({
+        type: "MINTED",
+        tokenId: minted.tokenId,
+        txHash: minted.txHash,
       });
-      dispatch({ type: "MINTED", tokenId: minted.tokenId, txHash: minted.txHash });
       const [status, nextSupply] = await Promise.all([
         getGameStatus(state.wallet),
-        loadMintSupplySnapshot(state.wallet)
+        loadMintSupplySnapshot(state.wallet),
       ]);
       dispatch({ type: "STATUS_LOADED", status });
       setSupply(nextSupply);
@@ -494,7 +526,9 @@ function App() {
       // Random-score mints never played, so there is no replay to save.
       let replayNote = "Replay not saved.";
       if (mintPayload.random) {
-        dialog.notify(`Token #${minted.tokenId} minted. Random score — no replay to save.`);
+        dialog.notify(
+          `Token #${minted.tokenId} minted. Random score — no replay to save.`,
+        );
         return;
       }
       try {
@@ -503,13 +537,16 @@ function App() {
           [
             { key: "onchain", label: "ON-CHAIN" },
             { key: "backend", label: "OFF-CHAIN" },
-            { key: "none", label: "DON'T SAVE" }
+            { key: "none", label: "DON'T SAVE" },
           ],
-          "SAVE REPLAY"
+          "SAVE REPLAY",
         );
         if (choice === "onchain") {
           dispatch({ type: "SET_LOADING", label: "Storing replay on-chain" });
-          await saveReplayOnchainTx(minted.tokenId, resolveFinalCells(mintPayload, state.game));
+          await saveReplayOnchainTx(
+            minted.tokenId,
+            resolveFinalCells(mintPayload, state.game),
+          );
           dispatch({ type: "SET_LOADING", label: "" });
           replayNote = "Replay stored on-chain.";
         } else if (choice === "backend") {
@@ -525,7 +562,10 @@ function App() {
 
       dialog.notify(`Token #${minted.tokenId} minted. ${replayNote}`);
     } catch (error) {
-      dispatch({ type: "SET_ERROR", message: error.shortMessage || error.message });
+      dispatch({
+        type: "SET_ERROR",
+        message: error.shortMessage || error.message,
+      });
     }
   };
 
@@ -551,9 +591,6 @@ function App() {
             onWalletInput={handleWalletInput}
             onConnect={openConnect}
             onDisconnect={disconnect}
-            inviteCode={inviteCode}
-            onInviteCodeChange={setInviteCode}
-            onRedeemCode={redeemCode}
             onStatus={scanStatus}
             onStart={play}
             onResult={fetchResult}
@@ -659,8 +696,8 @@ function WalletConnectModal({ busy, onClose, onPick }) {
         </p>
         {wallets.length === 0 ? (
           <div className="status-tape">
-            No browser wallet detected. Install MetaMask (or another EVM wallet), then
-            reload.
+            No browser wallet detected. Install MetaMask (or another EVM
+            wallet), then reload.
           </div>
         ) : (
           <div className="wallet-list">
@@ -685,7 +722,9 @@ function WalletConnectModal({ busy, onClose, onPick }) {
             ))}
           </div>
         )}
-        <p className="wallet-modal-note">Ethereum mainnet · read access + network switch only.</p>
+        <p className="wallet-modal-note">
+          Ethereum mainnet · read access + network switch only.
+        </p>
       </div>
     </div>
   );
@@ -700,12 +739,25 @@ function GameSurface({
   onStart,
   sessions,
   speed,
-  supply
+  supply,
 }) {
   return (
-    <div className={["screen-bezel", "flex", "flex-1", "flex-col", isMobile ? "mobile-game-surface" : ""].join(" ")}>
+    <div
+      className={[
+        "screen-bezel",
+        "flex",
+        "flex-1",
+        "flex-col",
+        isMobile ? "mobile-game-surface" : "",
+      ].join(" ")}
+    >
       {isMobile ? null : <MintSupplyTracker supply={supply} />}
-      <ScoreLine score={game.score} level={level} speed={speed} phase={game.phase} />
+      <ScoreLine
+        score={game.score}
+        level={level}
+        speed={speed}
+        phase={game.phase}
+      />
       <div className="mobile-play-layout">
         <SnakeBoard
           game={game}
@@ -713,10 +765,7 @@ function GameSurface({
           canStart={isMobile ? canStart : undefined}
         />
         {isMobile ? (
-          <MobileDirectionPad
-            dispatch={dispatch}
-            gamePhase={game.phase}
-          />
+          <MobileDirectionPad dispatch={dispatch} gamePhase={game.phase} />
         ) : null}
       </div>
       {isMobile ? null : <TouchControls dispatch={dispatch} />}
@@ -773,7 +822,8 @@ function MobileGameModal({ children, onClose }) {
 function MintSupplyTracker({ supply }) {
   const totalMinted = supply?.totalMinted ?? 0;
   const maxSupply = supply?.maxSupply ?? 7777;
-  const percentage = maxSupply > 0 ? Math.min((totalMinted / maxSupply) * 100, 100) : 0;
+  const percentage =
+    maxSupply > 0 ? Math.min((totalMinted / maxSupply) * 100, 100) : 0;
 
   return (
     <section className="mint-tracker" aria-label="Mint progress">
@@ -799,7 +849,8 @@ function MintSupplyTracker({ supply }) {
 const ADMIN_ROUTES = {
   overview: "/sekioadmini",
   allowlist: "/sekioadmini/allowlist",
-  invites: "/sekioadmini/invites"
+  invites: "/sekioadmini/invites",
+  bots: "/sekioadmini/bots",
 };
 
 // Matches an EVM address anywhere in a string (a CSV cell, a line, etc.).
@@ -834,7 +885,8 @@ const ALLOWLIST_RENDER_CAP = 500;
 
 function chunk(items, size) {
   const out = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  for (let i = 0; i < items.length; i += size)
+    out.push(items.slice(i, i + size));
   return out;
 }
 
@@ -842,6 +894,7 @@ function resolveAdminView() {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path === ADMIN_ROUTES.allowlist) return "allowlist";
   if (path === ADMIN_ROUTES.invites) return "invites";
+  if (path === ADMIN_ROUTES.bots) return "bots";
   return "overview";
 }
 
@@ -867,10 +920,11 @@ function AdminPage({ dialog }) {
     tierPrices: "",
     transferValidator: "",
     autoApprove: true,
-    abandonWallet: ""
+    abandonWallet: "",
   });
   const [inviteCodes, setInviteCodes] = useState([]);
   const [allowlistEntries, setAllowlistEntries] = useState([]);
+  const [botFlags, setBotFlags] = useState([]);
 
   useEffect(() => {
     const syncView = () => setView(resolveAdminView());
@@ -900,7 +954,7 @@ function AdminPage({ dialog }) {
         royaltyReceiver: nextSnapshot.owner,
         withdrawRecipient: nextSnapshot.owner,
         newOwner: nextSnapshot.owner,
-        vaultRecipient: current.vaultRecipient || nextSnapshot.owner
+        vaultRecipient: current.vaultRecipient || nextSnapshot.owner,
       }));
     } catch (error) {
       setMessage(error.shortMessage || error.message);
@@ -911,14 +965,18 @@ function AdminPage({ dialog }) {
 
   const updateForm = (event) => {
     const value =
-      event.target.type === "checkbox" ? event.target.checked : event.target.value.trim();
+      event.target.type === "checkbox"
+        ? event.target.checked
+        : event.target.value.trim();
     setForm({ ...form, [event.target.name]: value });
   };
 
   const connectAdminWallet = async () => {
     try {
       setLoadingLabel("Connecting wallet");
-      const [wallet] = await window.ethereum.request({ method: "eth_requestAccounts" });
+      const [wallet] = await window.ethereum.request({
+        method: "eth_requestAccounts",
+      });
       setForm((current) => ({ ...current, adminWallet: wallet }));
     } catch (error) {
       setMessage(error.shortMessage || error.message);
@@ -932,7 +990,7 @@ function AdminPage({ dialog }) {
     const { message } = await getInviteAdminMessage(form.adminWallet);
     return window.ethereum.request({
       method: "personal_sign",
-      params: [message, form.adminWallet]
+      params: [message, form.adminWallet],
     });
   };
 
@@ -944,7 +1002,7 @@ function AdminPage({ dialog }) {
       const result = await generateInviteCodes(
         form.adminWallet,
         signature,
-        Number(form.codeCount || 1)
+        Number(form.codeCount || 1),
       );
       setInviteCodes(result.codes);
       setMessage(`Generated ${result.codes.length} invite code(s)`);
@@ -962,13 +1020,13 @@ function AdminPage({ dialog }) {
       const signature = await signAdminMessage();
       const [codesResult, settingsResult] = await Promise.all([
         listInviteCodes(form.adminWallet, signature),
-        readInviteSettings(form.adminWallet, signature)
+        readInviteSettings(form.adminWallet, signature),
       ]);
       const result = codesResult;
       setInviteCodes(result.codes);
       setForm((current) => ({
         ...current,
-        inviteRequired: settingsResult.settings.inviteRequired
+        inviteRequired: settingsResult.settings.inviteRequired,
       }));
     } catch (error) {
       setMessage(error.shortMessage || error.message);
@@ -993,7 +1051,9 @@ function AdminPage({ dialog }) {
   };
 
   const clearCodes = async () => {
-    const confirmed = await dialog.confirm("Clear every invite code from the backend?");
+    const confirmed = await dialog.confirm(
+      "Clear every invite code from the backend?",
+    );
     if (!confirmed) return;
 
     try {
@@ -1018,13 +1078,17 @@ function AdminPage({ dialog }) {
       const result = await updateInviteSettings(
         form.adminWallet,
         signature,
-        Boolean(form.inviteRequired)
+        Boolean(form.inviteRequired),
       );
       setForm((current) => ({
         ...current,
-        inviteRequired: result.settings.inviteRequired
+        inviteRequired: result.settings.inviteRequired,
       }));
-      setMessage(result.settings.inviteRequired ? "Invite codes are required" : "Invite codes are off");
+      setMessage(
+        result.settings.inviteRequired
+          ? "Invite codes are required"
+          : "Invite codes are off",
+      );
     } catch (error) {
       setMessage(error.shortMessage || error.message);
     } finally {
@@ -1039,6 +1103,39 @@ function AdminPage({ dialog }) {
       const signature = await signAdminMessage();
       const result = await listAllowlist(form.adminWallet, signature);
       setAllowlistEntries(result.entries || []);
+    } catch (error) {
+      setMessage(error.shortMessage || error.message);
+    } finally {
+      setLoadingLabel("");
+    }
+  };
+
+  const loadBotFlags = async () => {
+    try {
+      setLoadingLabel("Loading flagged wallets");
+      setMessage("");
+      const signature = await signAdminMessage();
+      const result = await listBotFlags(form.adminWallet, signature);
+      setBotFlags(result.flags || []);
+    } catch (error) {
+      setMessage(error.shortMessage || error.message);
+    } finally {
+      setLoadingLabel("");
+    }
+  };
+
+  const removeBotEntry = async (targetWallet) => {
+    try {
+      setLoadingLabel("Removing flag");
+      setMessage("");
+      const signature = await signAdminMessage();
+      await removeBotFlag(form.adminWallet, signature, targetWallet);
+      setBotFlags((flags) =>
+        flags.filter((flag) => flag.walletAddress !== targetWallet),
+      );
+      setMessage(
+        `Removed bot flag for ${targetWallet}. That wallet can play again.`,
+      );
     } catch (error) {
       setMessage(error.shortMessage || error.message);
     } finally {
@@ -1063,13 +1160,18 @@ function AdminPage({ dialog }) {
         return;
       }
 
-      const merged = extractWallets(`${form.allowlistInput}\n${fromFile.wallets.join("\n")}`);
-      setForm((current) => ({ ...current, allowlistInput: merged.wallets.join("\n") }));
+      const merged = extractWallets(
+        `${form.allowlistInput}\n${fromFile.wallets.join("\n")}`,
+      );
+      setForm((current) => ({
+        ...current,
+        allowlistInput: merged.wallets.join("\n"),
+      }));
       setAllowlistStats({
         source: file.name,
         found: fromFile.wallets.length,
         removed: fromFile.duplicates,
-        ready: merged.wallets.length
+        ready: merged.wallets.length,
       });
     } catch (error) {
       dialog.notify(`Could not read file: ${error.message}`);
@@ -1079,7 +1181,12 @@ function AdminPage({ dialog }) {
   const dedupeAllowlistInput = () => {
     const { wallets, duplicates } = extractWallets(form.allowlistInput);
     setForm((current) => ({ ...current, allowlistInput: wallets.join("\n") }));
-    setAllowlistStats({ source: "manual", found: wallets.length, removed: duplicates, ready: wallets.length });
+    setAllowlistStats({
+      source: "manual",
+      found: wallets.length,
+      removed: duplicates,
+      ready: wallets.length,
+    });
   };
 
   const addAllowlistEntries = async () => {
@@ -1101,7 +1208,9 @@ function AdminPage({ dialog }) {
 
       for (let i = 0; i < batches.length; i += 1) {
         const done = Math.min((i + 1) * ALLOWLIST_BATCH_SIZE, wallets.length);
-        setLoadingLabel(`Adding allowlist ${done}/${wallets.length} (batch ${i + 1}/${batches.length})`);
+        setLoadingLabel(
+          `Adding allowlist ${done}/${wallets.length} (batch ${i + 1}/${batches.length})`,
+        );
         try {
           await addAllowlistWallets(form.adminWallet, signature, batches[i]);
           added += batches[i].length;
@@ -1114,9 +1223,11 @@ function AdminPage({ dialog }) {
       setForm((current) => ({ ...current, allowlistInput: "" }));
       setAllowlistStats(null);
       const dupNote = duplicates ? ` · ${duplicates} duplicate(s) skipped` : "";
-      const failNote = failed ? ` · ${failed} failed — re-run to retry (duplicates are ignored)` : "";
+      const failNote = failed
+        ? ` · ${failed} failed — re-run to retry (duplicates are ignored)`
+        : "";
       setMessage(
-        `Submitted ${added}/${wallets.length} wallet(s) in ${batches.length} batch(es)${dupNote}${failNote}. Press LOAD to view.`
+        `Submitted ${added}/${wallets.length} wallet(s) in ${batches.length} batch(es)${dupNote}${failNote}. Press LOAD to view.`,
       );
     } catch (error) {
       setMessage(error.shortMessage || error.message);
@@ -1131,7 +1242,7 @@ function AdminPage({ dialog }) {
       const signature = await signAdminMessage();
       await removeAllowlistWallet(form.adminWallet, signature, targetWallet);
       setAllowlistEntries((entries) =>
-        entries.filter((entry) => entry.walletAddress !== targetWallet)
+        entries.filter((entry) => entry.walletAddress !== targetWallet),
       );
     } catch (error) {
       setMessage(error.shortMessage || error.message);
@@ -1141,7 +1252,9 @@ function AdminPage({ dialog }) {
   };
 
   const clearAllowlistEntries = async () => {
-    const confirmed = await dialog.confirm("Clear every wallet from the allowlist?");
+    const confirmed = await dialog.confirm(
+      "Clear every wallet from the allowlist?",
+    );
     if (!confirmed) return;
 
     try {
@@ -1167,12 +1280,16 @@ function AdminPage({ dialog }) {
       setLoadingLabel("Abandoning pending run");
       setMessage("");
       const signature = await signAdminMessage();
-      const result = await abandonPendingSession(form.adminWallet, signature, form.abandonWallet);
+      const result = await abandonPendingSession(
+        form.adminWallet,
+        signature,
+        form.abandonWallet,
+      );
       setForm((current) => ({ ...current, abandonWallet: "" }));
       setMessage(
         result.expired
           ? `Expired ${result.expired} pending run(s) for ${result.wallet}. That wallet can play again.`
-          : `No stuck run for ${result.wallet} (a still-mintable run can't be abandoned).`
+          : `No stuck run for ${result.wallet} (a still-mintable run can't be abandoned).`,
       );
     } catch (error) {
       setMessage(error.shortMessage || error.message);
@@ -1188,7 +1305,7 @@ function AdminPage({ dialog }) {
     }
 
     await window.navigator.clipboard.writeText(
-      allowlistEntries.map((entry) => entry.walletAddress).join("\n")
+      allowlistEntries.map((entry) => entry.walletAddress).join("\n"),
     );
     dialog.notify(`Copied ${allowlistEntries.length} allowlisted wallet(s).`);
   };
@@ -1245,10 +1362,22 @@ function AdminPage({ dialog }) {
             <Ticket size={16} />
             INVITE CODES
           </button>
+          <button
+            className={`admin-tab ${view === "bots" ? "active" : ""}`}
+            onClick={() => navigate("bots")}
+            type="button"
+          >
+            <CircleStop size={16} />
+            BOT FLAGS
+          </button>
         </nav>
 
         <div className="admin-authbar">
-          <button className="press-key" onClick={connectAdminWallet} type="button">
+          <button
+            className="press-key"
+            onClick={connectAdminWallet}
+            type="button"
+          >
             <Wallet size={15} />
             {walletConnected ? "RECONNECT" : "CONNECT ADMIN WALLET"}
           </button>
@@ -1259,7 +1388,9 @@ function AdminPage({ dialog }) {
             placeholder="admin wallet"
             value={form.adminWallet}
           />
-          <span className={`admin-badge ${walletConnected ? "online" : ""}`}>{shortWallet}</span>
+          <span className={`admin-badge ${walletConnected ? "online" : ""}`}>
+            {shortWallet}
+          </span>
         </div>
 
         {loadingLabel && <div className="pulse-note">{loadingLabel}...</div>}
@@ -1272,7 +1403,11 @@ function AdminPage({ dialog }) {
                 <ShieldCheck size={18} />
                 CONTRACT STATUS
               </div>
-              <button className="start-button wide" onClick={loadSnapshot} type="button">
+              <button
+                className="start-button wide"
+                onClick={loadSnapshot}
+                type="button"
+              >
                 <RefreshCw size={16} />
                 LOAD CONTRACT
               </button>
@@ -1306,7 +1441,9 @@ function AdminPage({ dialog }) {
                   </div>
                 </>
               ) : (
-                <div className="status-tape">Load the contract to read live on-chain state.</div>
+                <div className="status-tape">
+                  Load the contract to read live on-chain state.
+                </div>
               )}
             </aside>
 
@@ -1323,7 +1460,9 @@ function AdminPage({ dialog }) {
                   label="Mint price (ETH)"
                   onChange={updateForm}
                   onClick={() =>
-                    runAdminAction("Setting price", () => setContractMintPrice(form.mintPriceEth))
+                    runAdminAction("Setting price", () =>
+                      setContractMintPrice(form.mintPriceEth),
+                    )
                   }
                   placeholder="0.01"
                   value={form.mintPriceEth}
@@ -1335,14 +1474,18 @@ function AdminPage({ dialog }) {
                   label="Game signer"
                   onChange={updateForm}
                   onClick={() =>
-                    runAdminAction("Setting signer", () => setContractGameSigner(form.gameSigner))
+                    runAdminAction("Setting signer", () =>
+                      setContractGameSigner(form.gameSigner),
+                    )
                   }
                   placeholder="0x…"
                   value={form.gameSigner}
                 />
                 <div className="action-card">
                   <div className="mini-title">DEFAULT ROYALTY</div>
-                  <p className="action-hint">Receiver + basis points (500 = 5%).</p>
+                  <p className="action-hint">
+                    Receiver + basis points (500 = 5%).
+                  </p>
                   <input
                     className="terminal-input"
                     name="royaltyReceiver"
@@ -1361,7 +1504,10 @@ function AdminPage({ dialog }) {
                     className="mt-2 press-key wide"
                     onClick={() =>
                       runAdminAction("Setting royalty", () =>
-                        setContractDefaultRoyalty(form.royaltyReceiver, form.royaltyBps)
+                        setContractDefaultRoyalty(
+                          form.royaltyReceiver,
+                          form.royaltyBps,
+                        ),
                       )
                     }
                     type="button"
@@ -1371,7 +1517,9 @@ function AdminPage({ dialog }) {
                   <button
                     className="mt-2 press-key wide danger"
                     onClick={() =>
-                      runAdminAction("Deleting royalty", () => deleteContractDefaultRoyalty())
+                      runAdminAction("Deleting royalty", () =>
+                        deleteContractDefaultRoyalty(),
+                      )
                     }
                     type="button"
                   >
@@ -1386,7 +1534,9 @@ function AdminPage({ dialog }) {
                   label="Withdraw recipient"
                   onChange={updateForm}
                   onClick={() =>
-                    runAdminAction("Withdrawing", () => withdrawContract(form.withdrawRecipient))
+                    runAdminAction("Withdrawing", () =>
+                      withdrawContract(form.withdrawRecipient),
+                    )
                   }
                   placeholder="0x…"
                   value={form.withdrawRecipient}
@@ -1400,7 +1550,7 @@ function AdminPage({ dialog }) {
                   onChange={updateForm}
                   onClick={() =>
                     runAdminAction("Transferring owner", () =>
-                      transferContractOwnership(form.newOwner)
+                      transferContractOwnership(form.newOwner),
                     )
                   }
                   placeholder="0x…"
@@ -1409,8 +1559,8 @@ function AdminPage({ dialog }) {
                 <div className="action-card">
                   <div className="mini-title">MINT VAULT</div>
                   <p className="action-hint">
-                    Free owner mint to a wallet. Bypasses the per-wallet cap; mint in small
-                    batches (e.g. 10).
+                    Free owner mint to a wallet. Bypasses the per-wallet cap;
+                    mint in small batches (e.g. 10).
                   </p>
                   <input
                     className="terminal-input"
@@ -1430,7 +1580,7 @@ function AdminPage({ dialog }) {
                     className="mt-2 press-key wide"
                     onClick={() =>
                       runAdminAction("Minting vault", () =>
-                        mintVaultToWallet(form.vaultRecipient, form.vaultCount)
+                        mintVaultToWallet(form.vaultRecipient, form.vaultCount),
                       )
                     }
                     type="button"
@@ -1446,7 +1596,7 @@ function AdminPage({ dialog }) {
                   onChange={updateForm}
                   onClick={() =>
                     runAdminAction("Setting tier prices", () =>
-                      setContractMintTierPrices(form.tierPrices)
+                      setContractMintTierPrices(form.tierPrices),
                     )
                   }
                   placeholder="0.01, 0.02, 0.03"
@@ -1454,7 +1604,9 @@ function AdminPage({ dialog }) {
                 />
                 <div className="action-card">
                   <div className="mini-title">TRANSFER VALIDATOR</div>
-                  <p className="action-hint">Royalty-enforcement validator + auto-approve.</p>
+                  <p className="action-hint">
+                    Royalty-enforcement validator + auto-approve.
+                  </p>
                   <input
                     className="terminal-input"
                     name="transferValidator"
@@ -1466,7 +1618,7 @@ function AdminPage({ dialog }) {
                     className="mt-2 press-key wide"
                     onClick={() =>
                       runAdminAction("Setting validator", () =>
-                        setContractTransferValidator(form.transferValidator)
+                        setContractTransferValidator(form.transferValidator),
                       )
                     }
                     type="button"
@@ -1486,7 +1638,7 @@ function AdminPage({ dialog }) {
                     className="mt-2 press-key wide"
                     onClick={() =>
                       runAdminAction("Updating auto-approve", () =>
-                        setContractAutoApproveTransfers(form.autoApprove)
+                        setContractAutoApproveTransfers(form.autoApprove),
                       )
                     }
                     type="button"
@@ -1506,8 +1658,9 @@ function AdminPage({ dialog }) {
               ALLOWLIST ACCESS
             </div>
             <p className="action-hint">
-              Upload a CSV (with or without a header) or paste addresses. Wallets are extracted
-              automatically and duplicates are removed before adding.
+              Upload a CSV (with or without a header) or paste addresses.
+              Wallets are extracted automatically and duplicates are removed
+              before adding.
             </p>
 
             <div className="csv-tools">
@@ -1522,7 +1675,11 @@ function AdminPage({ dialog }) {
                   type="file"
                 />
               </label>
-              <button className="press-key" onClick={dedupeAllowlistInput} type="button">
+              <button
+                className="press-key"
+                onClick={dedupeAllowlistInput}
+                type="button"
+              >
                 <RefreshCw size={15} />
                 DEDUPE
               </button>
@@ -1530,10 +1687,16 @@ function AdminPage({ dialog }) {
 
             {allowlistStats && (
               <div className="csv-stats">
-                <span className="csv-chip">Source: {allowlistStats.source}</span>
+                <span className="csv-chip">
+                  Source: {allowlistStats.source}
+                </span>
                 <span className="csv-chip">Found: {allowlistStats.found}</span>
-                <span className="csv-chip warn">Duplicates removed: {allowlistStats.removed}</span>
-                <span className="csv-chip ok">Ready: {allowlistStats.ready}</span>
+                <span className="csv-chip warn">
+                  Duplicates removed: {allowlistStats.removed}
+                </span>
+                <span className="csv-chip ok">
+                  Ready: {allowlistStats.ready}
+                </span>
               </div>
             )}
 
@@ -1546,29 +1709,48 @@ function AdminPage({ dialog }) {
             />
 
             <div className="allowlist-tools">
-              <button className="press-key" onClick={addAllowlistEntries} type="button">
+              <button
+                className="press-key"
+                onClick={addAllowlistEntries}
+                type="button"
+              >
                 ADD TO ALLOWLIST
               </button>
-              <button className="press-key" onClick={loadAllowlistEntries} type="button">
+              <button
+                className="press-key"
+                onClick={loadAllowlistEntries}
+                type="button"
+              >
                 LOAD
               </button>
-              <button className="press-key" onClick={copyAllowlist} type="button">
+              <button
+                className="press-key"
+                onClick={copyAllowlist}
+                type="button"
+              >
                 COPY ALL
               </button>
-              <button className="press-key danger" onClick={clearAllowlistEntries} type="button">
+              <button
+                className="press-key danger"
+                onClick={clearAllowlistEntries}
+                type="button"
+              >
                 <Trash2 size={15} />
                 CLEAR ALL
               </button>
             </div>
 
             <div className="list-count">
-              {allowlistEntries.length} wallet{allowlistEntries.length === 1 ? "" : "s"} on the allowlist
+              {allowlistEntries.length} wallet
+              {allowlistEntries.length === 1 ? "" : "s"} on the allowlist
               {allowlistEntries.length > ALLOWLIST_RENDER_CAP &&
                 ` · showing first ${ALLOWLIST_RENDER_CAP} (use COPY ALL for the full list)`}
             </div>
             <div className="allowlist-list scrolled">
               {allowlistEntries.length === 0 && (
-                <div className="status-tape">No allowlisted wallets loaded.</div>
+                <div className="status-tape">
+                  No allowlisted wallets loaded.
+                </div>
               )}
               {allowlistEntries.slice(0, ALLOWLIST_RENDER_CAP).map((entry) => (
                 <div className="allowlist-row" key={entry.walletAddress}>
@@ -1613,7 +1795,11 @@ function AdminPage({ dialog }) {
                 />
                 <span>Require an invite code to play &amp; mint</span>
               </label>
-              <button className="press-key wide" onClick={saveInviteRequirement} type="button">
+              <button
+                className="press-key wide"
+                onClick={saveInviteRequirement}
+                type="button"
+              >
                 SAVE INVITE MODE
               </button>
             </div>
@@ -1628,30 +1814,52 @@ function AdminPage({ dialog }) {
                   placeholder="1000"
                   value={form.codeCount}
                 />
-                <button className="press-key" onClick={generateCodes} type="button">
+                <button
+                  className="press-key"
+                  onClick={generateCodes}
+                  type="button"
+                >
                   GENERATE
                 </button>
                 <button className="press-key" onClick={loadCodes} type="button">
                   LOAD
                 </button>
-                <button className="press-key" onClick={copyAllCodes} type="button">
+                <button
+                  className="press-key"
+                  onClick={copyAllCodes}
+                  type="button"
+                >
                   COPY ALL
                 </button>
-                <button className="press-key danger" onClick={clearCodes} type="button">
+                <button
+                  className="press-key danger"
+                  onClick={clearCodes}
+                  type="button"
+                >
                   <Trash2 size={15} />
                   CLEAR
                 </button>
               </div>
             </div>
 
-            <div className="list-count">{inviteCodes.length} code(s) loaded</div>
+            <div className="list-count">
+              {inviteCodes.length} code(s) loaded
+            </div>
             <div className="invite-list scrolled">
-              {inviteCodes.length === 0 && <div className="status-tape">No codes loaded.</div>}
+              {inviteCodes.length === 0 && (
+                <div className="status-tape">No codes loaded.</div>
+              )}
               {inviteCodes.map((invite) => (
                 <div className="invite-row" key={invite.code}>
                   <code>{invite.code}</code>
-                  <span className={`invite-state ${invite.redeemedBy ? "used" : "open"}`}>
-                    {invite.mintedBy ? "MINTED" : invite.redeemedBy ? "REDEEMED" : "OPEN"}
+                  <span
+                    className={`invite-state ${invite.redeemedBy ? "used" : "open"}`}
+                  >
+                    {invite.mintedBy
+                      ? "MINTED"
+                      : invite.redeemedBy
+                        ? "REDEEMED"
+                        : "OPEN"}
                   </span>
                   <button
                     aria-label={`Copy ${invite.code}`}
@@ -1668,8 +1876,9 @@ function AdminPage({ dialog }) {
             <div className="invite-generate">
               <div className="mini-title">ABANDON STUCK RUN</div>
               <p className="action-hint">
-                Expire a wallet&apos;s locked-but-unminted run so it can play again — e.g.
-                after a game-signer change or an expired reveal block left it unmintable.
+                Expire a wallet&apos;s locked-but-unminted run so it can play
+                again — e.g. after a game-signer change or an expired reveal
+                block left it unmintable.
               </p>
               <div className="invite-tools">
                 <input
@@ -1679,10 +1888,62 @@ function AdminPage({ dialog }) {
                   placeholder="wallet 0x…"
                   value={form.abandonWallet}
                 />
-                <button className="press-key danger" onClick={abandonRun} type="button">
+                <button
+                  className="press-key danger"
+                  onClick={abandonRun}
+                  type="button"
+                >
                   ABANDON RUN
                 </button>
               </div>
+            </div>
+          </section>
+        )}
+
+        {view === "bots" && (
+          <section className="panel admin-feature-panel">
+            <div className="panel-title">
+              <CircleStop size={18} />
+              BOT FLAGS
+            </div>
+            <p className="action-hint">
+              Wallets auto-flagged for suspicious (bot-like) play are blocked
+              from starting runs. Review and remove a flag to let a wallet play
+              again.
+            </p>
+
+            <div className="allowlist-tools">
+              <button
+                className="press-key"
+                onClick={loadBotFlags}
+                type="button"
+              >
+                <RefreshCw size={15} />
+                LOAD FLAGGED
+              </button>
+            </div>
+
+            <div className="list-count">
+              {botFlags.length} flagged wallet{botFlags.length === 1 ? "" : "s"}
+            </div>
+            <div className="allowlist-list scrolled">
+              {botFlags.length === 0 && (
+                <div className="status-tape">No flagged wallets loaded.</div>
+              )}
+              {botFlags.map((flag) => (
+                <div className="allowlist-row" key={flag.walletAddress}>
+                  <code>{flag.walletAddress}</code>
+                  <span className="invite-state used">×{flag.flagCount}</span>
+                  <button
+                    aria-label={`Remove flag for ${flag.walletAddress}`}
+                    className="icon-remove"
+                    onClick={() => removeBotEntry(flag.walletAddress)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
             </div>
           </section>
         )}
@@ -1691,7 +1952,17 @@ function AdminPage({ dialog }) {
   );
 }
 
-function AdminAction({ buttonLabel, danger, hint, inputName, label, onChange, onClick, placeholder, value }) {
+function AdminAction({
+  buttonLabel,
+  danger,
+  hint,
+  inputName,
+  label,
+  onChange,
+  onClick,
+  placeholder,
+  value,
+}) {
   return (
     <div className="action-card">
       <div className="mini-title">{label}</div>
@@ -1703,7 +1974,11 @@ function AdminAction({ buttonLabel, danger, hint, inputName, label, onChange, on
         placeholder={placeholder || label}
         value={value}
       />
-      <button className={`press-key wide mt-2 ${danger ? "danger" : ""}`} onClick={onClick} type="button">
+      <button
+        className={`press-key wide mt-2 ${danger ? "danger" : ""}`}
+        onClick={onClick}
+        type="button"
+      >
         {buttonLabel}
       </button>
     </div>
@@ -1748,7 +2023,7 @@ function useDialog() {
     setDialogState({
       message,
       mode: "notice",
-      title: "SNAKIOX SIGNAL"
+      title: "SNAKIOX SIGNAL",
     });
   };
 
@@ -1758,7 +2033,7 @@ function useDialog() {
       setDialogState({
         message,
         mode: "confirm",
-        title: "CONFIRM ACTION"
+        title: "CONFIRM ACTION",
       });
     });
 
@@ -1801,11 +2076,19 @@ function CustomDialog({ dialog }) {
           ) : (
             <>
               {isConfirm && (
-                <button className="press-key" onClick={() => dialog.close(false)} type="button">
+                <button
+                  className="press-key"
+                  onClick={() => dialog.close(false)}
+                  type="button"
+                >
                   CANCEL
                 </button>
               )}
-              <button className="start-button" onClick={() => dialog.close(true)} type="button">
+              <button
+                className="start-button"
+                onClick={() => dialog.close(true)}
+                type="button"
+              >
                 {isConfirm ? "CONFIRM" : "OK"}
               </button>
             </>
@@ -1825,24 +2108,14 @@ function ControlPanel({
   onWalletInput,
   onConnect,
   onDisconnect,
-  inviteCode,
-  onInviteCodeChange,
-  onRedeemCode,
   onStatus,
   onStart,
   onResult,
-  onGenerateRandom
+  onGenerateRandom,
 }) {
   const connected = Boolean(state.wallet);
   const startRetrying = retryInfo?.key === "play";
   const mintRetrying = retryInfo?.key === "mint";
-  // Item 5: once a wallet is allowlisted or already holds an active code, it
-  // can't redeem again — lock the input and the button.
-  const inviteLocked = Boolean(
-    state.status?.isAllowlisted ||
-      state.status?.hasInvite ||
-      state.status?.inviteRequired === false
-  );
 
   return (
     <aside className="panel">
@@ -1861,27 +2134,22 @@ function ControlPanel({
         <button className="press-key" onClick={onConnect} disabled={busy}>
           CONNECT
         </button>
-        <button className="press-key" onClick={onDisconnect} disabled={!connected}>
+        <button
+          className="press-key"
+          onClick={onDisconnect}
+          disabled={!connected}
+        >
           DISCONNECT
         </button>
       </div>
-      <button className="press-key wide" onClick={onStatus} disabled={busy || !connected}>
-        SCAN STATUS
-      </button>
-      <input
-        className="terminal-input"
-        onChange={(event) => onInviteCodeChange(event.target.value)}
-        placeholder={inviteLocked ? "CODE ALREADY ACTIVE" : "SNX-INVITE-CODE"}
-        value={inviteCode}
-        disabled={inviteLocked}
-      />
       <button
         className="press-key wide"
-        onClick={onRedeemCode}
-        disabled={busy || inviteLocked || !connected}
+        onClick={onStatus}
+        disabled={busy || !connected}
       >
-        REDEEM CODE
+        SCAN STATUS
       </button>
+
       <div className="status-tape">
         <p>{state.status?.registered ? "REGISTERED" : "UNREGISTERED"}</p>
         <p>
@@ -1897,9 +2165,15 @@ function ControlPanel({
       </div>
       {/* Item 4: on small screens these move into the RUN OUTPUT panel. */}
       <div className="desktop-only control-actions">
-        <button className="start-button" onClick={onStart} disabled={busy || !canPlayRound}>
+        <button
+          className="start-button"
+          onClick={onStart}
+          disabled={busy || !canPlayRound}
+        >
           <Gamepad2 size={18} />
-          {startRetrying ? `BUSY — RETRYING (${retryInfo.attempt})` : "START RUN"}
+          {startRetrying
+            ? `BUSY — RETRYING (${retryInfo.attempt})`
+            : "START RUN"}
         </button>
         <button
           className="press-key wide"
@@ -1907,10 +2181,18 @@ function ControlPanel({
           disabled={busy || !canPlayRound}
           title="Skip playing: get a random score and mint it. No replay, and it can't be re-rolled."
         >
-          {mintRetrying ? `BUSY — RETRYING (${retryInfo.attempt})` : "GENERATE RANDOM & MINT"}
+          {mintRetrying
+            ? `BUSY — RETRYING (${retryInfo.attempt})`
+            : "GENERATE RANDOM & MINT"}
         </button>
-        {mintedOut && <div className="minted-out-note">All 3 mint spots used.</div>}
-        <button className="press-key wide" onClick={onResult} disabled={busy || !connected}>
+        {mintedOut && (
+          <div className="minted-out-note">All 3 mint spots used.</div>
+        )}
+        <button
+          className="press-key wide"
+          onClick={onResult}
+          disabled={busy || !connected}
+        >
           LOAD LOCKED RESULT
         </button>
       </div>
@@ -1919,7 +2201,9 @@ function ControlPanel({
           Server busy — retrying (attempt {retryInfo.attempt})…
         </div>
       ) : (
-        state.loadingLabel && <div className="pulse-note">{state.loadingLabel}...</div>
+        state.loadingLabel && (
+          <div className="pulse-note">{state.loadingLabel}...</div>
+        )
       )}
       {state.error && <div className="error-tape">{state.error}</div>}
     </aside>
@@ -1938,7 +2222,10 @@ function ScoreLine({ score, level, speed, phase }) {
 }
 
 function SnakeBoard({ game, onStart, canStart }) {
-  const snakeCells = useMemo(() => new Set(game.snake.map(makeCellKey)), [game.snake]);
+  const snakeCells = useMemo(
+    () => new Set(game.snake.map(makeCellKey)),
+    [game.snake],
+  );
   const headKey = makeCellKey(game.snake[0]);
   const faceDir = game.direction || headDirection(game.snake);
 
@@ -1964,8 +2251,10 @@ function SnakeBoard({ game, onStart, canStart }) {
         <div className="screen-message">PRESS START</div>
       );
     }
-    if (game.phase === "dead") return <div className="screen-message">SIGNAL LOST</div>;
-    if (game.phase === "locked") return <div className="screen-message">RESULT LOCKED</div>;
+    if (game.phase === "dead")
+      return <div className="screen-message">SIGNAL LOST</div>;
+    if (game.phase === "locked")
+      return <div className="screen-message">RESULT LOCKED</div>;
     return null;
   };
 
@@ -1988,7 +2277,7 @@ function SnakeBoard({ game, onStart, canStart }) {
                 "grid-cell",
                 isSnake ? "snake-cell" : "",
                 isHead ? "snake-head" : "",
-                isFood ? "food-cell" : ""
+                isFood ? "food-cell" : "",
               ].join(" ")}
               data-dir={isHead ? faceDir : undefined}
               key={key}
@@ -2072,10 +2361,26 @@ function MobileTrackpad({ onDir }) {
       onTouchEnd={handleTouchEnd}
       aria-label="Swipe pad"
     >
-      <span className={`snx-tp-arrow snx-tp-arrow--up${litDir === "UP" ? " snx-tp-lit" : ""}`}>▲</span>
-      <span className={`snx-tp-arrow snx-tp-arrow--down${litDir === "DOWN" ? " snx-tp-lit" : ""}`}>▼</span>
-      <span className={`snx-tp-arrow snx-tp-arrow--left${litDir === "LEFT" ? " snx-tp-lit" : ""}`}>◀</span>
-      <span className={`snx-tp-arrow snx-tp-arrow--right${litDir === "RIGHT" ? " snx-tp-lit" : ""}`}>▶</span>
+      <span
+        className={`snx-tp-arrow snx-tp-arrow--up${litDir === "UP" ? " snx-tp-lit" : ""}`}
+      >
+        ▲
+      </span>
+      <span
+        className={`snx-tp-arrow snx-tp-arrow--down${litDir === "DOWN" ? " snx-tp-lit" : ""}`}
+      >
+        ▼
+      </span>
+      <span
+        className={`snx-tp-arrow snx-tp-arrow--left${litDir === "LEFT" ? " snx-tp-lit" : ""}`}
+      >
+        ◀
+      </span>
+      <span
+        className={`snx-tp-arrow snx-tp-arrow--right${litDir === "RIGHT" ? " snx-tp-lit" : ""}`}
+      >
+        ▶
+      </span>
       <span className="snx-tp-label">SWIPE</span>
       {touchPct && (
         <span
@@ -2090,7 +2395,7 @@ function MobileTrackpad({ onDir }) {
 function MobileDirectionPad({ dispatch }) {
   const queue = (direction) => dispatch({ type: "QUEUE_DIRECTION", direction });
   const [ctrlMode, setCtrlMode] = useState(
-    () => localStorage.getItem("snakiox.ctrl.fe") || "dpad"
+    () => localStorage.getItem("snakiox.ctrl.fe") || "dpad",
   );
 
   const switchCtrl = (mode) => {
@@ -2119,16 +2424,32 @@ function MobileDirectionPad({ dispatch }) {
         </div>
         {ctrlMode === "dpad" ? (
           <div className="mobile-dpad" aria-label="Mobile direction controls">
-            <button className="dpad-up" onClick={() => queue("UP")} type="button">
+            <button
+              className="dpad-up"
+              onClick={() => queue("UP")}
+              type="button"
+            >
               <ChevronUp size={26} />
             </button>
-            <button className="dpad-left" onClick={() => queue("LEFT")} type="button">
+            <button
+              className="dpad-left"
+              onClick={() => queue("LEFT")}
+              type="button"
+            >
               <ChevronLeft size={26} />
             </button>
-            <button className="dpad-right" onClick={() => queue("RIGHT")} type="button">
+            <button
+              className="dpad-right"
+              onClick={() => queue("RIGHT")}
+              type="button"
+            >
               <ChevronRight size={26} />
             </button>
-            <button className="dpad-down" onClick={() => queue("DOWN")} type="button">
+            <button
+              className="dpad-down"
+              onClick={() => queue("DOWN")}
+              type="button"
+            >
               <ChevronDown size={26} />
             </button>
           </div>
@@ -2140,15 +2461,30 @@ function MobileDirectionPad({ dispatch }) {
   );
 }
 
-function ResultPanel({ state, busy, retryInfo, canPlayRound, mintedOut, level, speed, onMint, onGenerateRandom, onResult }) {
+function ResultPanel({
+  state,
+  busy,
+  retryInfo,
+  canPlayRound,
+  mintedOut,
+  level,
+  speed,
+  onMint,
+  onGenerateRandom,
+  onResult,
+}) {
   const session = state.game.lockedResult;
   const mintRetrying = retryInfo?.key === "mint";
   const hasInviteAccess =
     state.status?.isAllowlisted ||
     state.status?.inviteRequired === false ||
     state.status?.hasInvite;
-  const canMint = Boolean((state.mint || session) && !session?.txHash && hasInviteAccess);
-  const revealBlock = Number(state.mint?.revealBlock ?? session?.revealBlock ?? 0);
+  const canMint = Boolean(
+    (state.mint || session) && !session?.txHash && hasInviteAccess,
+  );
+  const revealBlock = Number(
+    state.mint?.revealBlock ?? session?.revealBlock ?? 0,
+  );
   const [reveal, setReveal] = useState(null);
 
   // Poll the reveal-block readiness only while a mintable run is pending and the
@@ -2197,9 +2533,15 @@ function ResultPanel({ state, busy, retryInfo, canPlayRound, mintedOut, level, s
       </div>
       <div className="metric-row">
         <span>DEATH</span>
-        <strong>{state.game.deathReason || session?.deathReason || "none"}</strong>
+        <strong>
+          {state.game.deathReason || session?.deathReason || "none"}
+        </strong>
       </div>
-      <button className="start-button" onClick={onMint} disabled={busy || !canMint}>
+      <button
+        className="start-button"
+        onClick={onMint}
+        disabled={busy || !canMint}
+      >
         <ShieldCheck size={18} />
         {mintRetrying ? `BUSY — RETRYING (${retryInfo.attempt})` : "MINT NFT"}
       </button>
@@ -2219,10 +2561,18 @@ function ResultPanel({ state, busy, retryInfo, canPlayRound, mintedOut, level, s
           disabled={busy || !canPlayRound}
           title="Skip playing: get a random score and mint it. No replay, and it can't be re-rolled."
         >
-          {mintRetrying ? `BUSY — RETRYING (${retryInfo.attempt})` : "GENERATE RANDOM & MINT"}
+          {mintRetrying
+            ? `BUSY — RETRYING (${retryInfo.attempt})`
+            : "GENERATE RANDOM & MINT"}
         </button>
-        {mintedOut && <div className="minted-out-note">All 3 mint spots used.</div>}
-        <button className="press-key wide" onClick={onResult} disabled={busy || !state.wallet}>
+        {mintedOut && (
+          <div className="minted-out-note">All 3 mint spots used.</div>
+        )}
+        <button
+          className="press-key wide"
+          onClick={onResult}
+          disabled={busy || !state.wallet}
+        >
           LOAD LOCKED RESULT
         </button>
       </div>
@@ -2235,7 +2585,10 @@ function ResultPanel({ state, busy, retryInfo, canPlayRound, mintedOut, level, s
         <p>Walls and self contact end the run.</p>
         <p>Every 50 points increases level and speed.</p>
       </div>
-      <button className="press-key wide" onClick={() => window.location.reload()}>
+      <button
+        className="press-key wide"
+        onClick={() => window.location.reload()}
+      >
         <RotateCcw size={16} />
         REBOOT DISPLAY
       </button>
@@ -2262,7 +2615,9 @@ function MobileActionsPanel({ sessions }) {
       <ReplayPanel sessions={sessions} />
       <MintedTokensPanel sessions={sessions} />
       {!hasReplays && !hasMinted && (
-        <div className="status-tape">Play and mint a run to unlock replays and tokens here.</div>
+        <div className="status-tape">
+          Play and mint a run to unlock replays and tokens here.
+        </div>
       )}
     </section>
   );
@@ -2370,7 +2725,10 @@ function ReplayPanel({ sessions }) {
 }
 
 function ReplayModal({ moves, onClose, session }) {
-  const frames = useMemo(() => buildReplayFrames(moves, session), [moves, session]);
+  const frames = useMemo(
+    () => buildReplayFrames(moves, session),
+    [moves, session],
+  );
   const [frameIndex, setFrameIndex] = useState(0);
   const frame = frames[frameIndex] || frames[0] || START_SNAKE;
   const cells = new Set(frame.map(makeCellKey));
@@ -2389,7 +2747,11 @@ function ReplayModal({ moves, onClose, session }) {
 
   return (
     <div className="nft-modal-backdrop" onClick={onClose} role="presentation">
-      <div className="replay-modal" onClick={(event) => event.stopPropagation()} role="dialog">
+      <div
+        className="replay-modal"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
         <div className="brand-strip">
           <span>SNAKIOX REPLAY</span>
           <button className="modal-close" onClick={onClose} type="button">
@@ -2398,7 +2760,9 @@ function ReplayModal({ moves, onClose, session }) {
         </div>
         <div
           className="replay-grid"
-          style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, minmax(0, 1fr))` }}
+          style={{
+            gridTemplateColumns: `repeat(${BOARD_SIZE}, minmax(0, 1fr))`,
+          }}
         >
           {Array.from({ length: BOARD_SIZE * BOARD_SIZE }, (_, index) => {
             const x = index % BOARD_SIZE;
@@ -2409,7 +2773,7 @@ function ReplayModal({ moves, onClose, session }) {
                 className={[
                   "grid-cell",
                   cells.has(key) ? "snake-cell" : "",
-                  headKey === key ? "snake-head" : ""
+                  headKey === key ? "snake-head" : "",
                 ].join(" ")}
                 data-dir={headKey === key ? faceDir : undefined}
                 key={key}
@@ -2440,14 +2804,20 @@ function buildReplayFrames(moves, session) {
     .slice()
     .sort((a, b) => (a.tick || 0) - (b.tick || 0));
   const lastTick = Math.max(...sortedMoves.map((move) => move.tick || 0), 30);
-  const targetLength = Math.max(session?.snakeLength || session?.finalSnakeCells?.length || 3, 3);
+  const targetLength = Math.max(
+    session?.snakeLength || session?.finalSnakeCells?.length || 3,
+    3,
+  );
   let direction = sortedMoves[0]?.direction || "RIGHT";
   let moveIndex = 0;
   let snake = START_SNAKE.map((cell) => ({ ...cell }));
   const frames = [snake];
 
   for (let tick = 1; tick <= lastTick + 16; tick += 1) {
-    while (sortedMoves[moveIndex + 1] && (sortedMoves[moveIndex + 1].tick || 0) <= tick) {
+    while (
+      sortedMoves[moveIndex + 1] &&
+      (sortedMoves[moveIndex + 1].tick || 0) <= tick
+    ) {
       moveIndex += 1;
       direction = sortedMoves[moveIndex].direction;
     }
@@ -2476,7 +2846,11 @@ function buildReplayFrames(moves, session) {
 function NftPreviewModal({ image, onClose, openSeaUrl, tokenId, txUrl }) {
   return (
     <div className="nft-modal-backdrop" onClick={onClose} role="presentation">
-      <div className="nft-modal" onClick={(event) => event.stopPropagation()} role="dialog">
+      <div
+        className="nft-modal"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
         <div className="brand-strip">
           <span>Snakiox #{tokenId}</span>
           <button className="modal-close" onClick={onClose} type="button">
@@ -2484,16 +2858,30 @@ function NftPreviewModal({ image, onClose, openSeaUrl, tokenId, txUrl }) {
           </button>
         </div>
         <div className="nft-modal-art">
-          {image ? <img alt={`Snakiox #${tokenId}`} src={image} /> : <span>LOADING TOKEN</span>}
+          {image ? (
+            <img alt={`Snakiox #${tokenId}`} src={image} />
+          ) : (
+            <span>LOADING TOKEN</span>
+          )}
         </div>
         {openSeaUrl && (
-          <a className="start-button" href={openSeaUrl} rel="noreferrer" target="_blank">
+          <a
+            className="start-button"
+            href={openSeaUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
             <ExternalLink size={18} />
             VIEW ON OPENSEA
           </a>
         )}
         {txUrl && (
-          <a className="press-key wide" href={txUrl} rel="noreferrer" target="_blank">
+          <a
+            className="press-key wide"
+            href={txUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
             <ExternalLink size={16} />
             VIEW TX
           </a>

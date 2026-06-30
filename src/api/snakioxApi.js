@@ -221,6 +221,22 @@ export function clearAllowlist(wallet, signature) {
   });
 }
 
+// Admin: list wallets auto-flagged for bot activity.
+export function listBotFlags(wallet, signature) {
+  return request("/invite/admin/bot/list", {
+    method: "POST",
+    body: JSON.stringify({ wallet, signature })
+  });
+}
+
+// Admin: remove a wallet's bot flag so it can play again.
+export function removeBotFlag(wallet, signature, targetWallet) {
+  return request("/invite/admin/bot/remove", {
+    method: "POST",
+    body: JSON.stringify({ wallet, signature, targetWallet })
+  });
+}
+
 // Admin: expire a wallet's locked-but-unminted run so it can play again.
 export function abandonPendingSession(wallet, signature, targetWallet) {
   return request("/invite/admin/session/abandon", {
