@@ -2151,15 +2151,12 @@ function ControlPanel({
       </button>
 
       <div className="status-tape">
-        <p>{state.status?.registered ? "REGISTERED" : "UNREGISTERED"}</p>
         <p>
-          {state.status?.isAllowlisted
-            ? "ALLOWLIST ACCESS"
-            : state.status?.hasInvite
-              ? "CODE ACTIVE"
-              : state.status?.inviteRequired === false
-                ? "OPEN ACCESS"
-                : "CODE REQUIRED"}
+          {!connected
+            ? "CONNECT WALLET"
+            : state.status?.canPlay
+              ? "READY TO PLAY"
+              : "WALLET LINKED"}
         </p>
         {state.status?.reason && <p>{state.status.reason}</p>}
       </div>
